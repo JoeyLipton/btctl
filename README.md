@@ -19,23 +19,11 @@ From the project root (where `go.mod` lives):
 The binary has no runtime dependencies and can be copied to `~/.local/bin/` or
 `/usr/local/bin/`.
 
-## Global flags
-
-- `-v` (must precede the subcommand) logs every outgoing D-Bus method call to
-  stderr in the form `[v] call: <iface>.<method> on <path>`. Without `-v`,
-  btctl is silent on stderr in normal operation.
-- `-h` / `--help` at any position prints the help page on stdout and exits 0.
-- `btctl help` is equivalent to `btctl -h`.
-
-Every D-Bus method call is bounded by an internal 3-second timeout. `disconnect`
-waits up to 10 seconds for `Connected: false` after the D-Bus call returns, since
-BLE devices can take several seconds to complete link teardown.
-
 ## Subcommands
 
 ### btctl help
 
-Prints a one-screen help page covering every subcommand, the scan options,
+Prints a help page covering every subcommand, the scan options,
 example invocations, and the exit-code legend. Mirrors `btctl -h` /
 `btctl --help`.
 
@@ -117,32 +105,6 @@ command prints `error: device not found: <address>` to stderr and exits 1.
 Disconnects from a device. Same address matching rules as `connect`.
 
     $ btctl disconnect AA:BB:CC:DD:EE:FF
-
-## Exit codes
-
-    0  success (status always exits 0)
-    1  runtime error (D-Bus failure, device not found, etc.)
-    2  bad command-line arguments
-
-## Polybar block
-
-Drop the following block into your polybar config (typically
-`~/.config/polybar/config.ini`):
-
-    [module/bluetooth]
-    type = custom/script
-    exec = btctl status
-    interval = 5
-    format = <output>
-    format-foreground = #ffffff
-    click-left = btctl pick
-
-`btctl status` is cheap (~3ms warm) so an `interval` of 1-5 seconds is fine.
-The output is plain ASCII, so no font fallback is needed.
-
-Ensure `btctl` is in a system PATH location such as `/usr/local/bin`, or use
-the full path in the `exec` line. polybar does not inherit your shell's PATH by
-default, so a bare `btctl` may not be found even though it works in a terminal.
 
 ## i3 keybind for the picker
 
