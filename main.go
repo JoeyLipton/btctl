@@ -266,21 +266,34 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	}
 	defer func() { _ = client.Close() }()
 
-	// The menu answers pairing requests with pickers; every other command
-	// has nobody to ask, so it accepts them.
+	// Only commands that can pair register an agent: while registered, btctl
+	// is BlueZ's default agent. The menu answers pairing requests with
+	// pickers; the CLI commands use the terminal.
 	var menu *bluetooth.Menu
-	var handler bluetooth.PairingHandler = bluetooth.CLIHandler{Interactive: isTerminal(os.Stdin)}
-	if parsed.name == "pick" {
-		menu = bluetooth.NewMenu(client, parsed.pickCfg)
-		handler = menu.PairingHandler()
+	if commandCanPair(parsed.name) {
+		var handler bluetooth.PairingHandler = bluetooth.CLIHandler{Interactive: isTerminal(os.Stdin)}
+		if parsed.name == "pick" {
+			menu = bluetooth.NewMenu(client, parsed.pickCfg)
+			handler = menu.PairingHandler()
+		}
+		unregister, err := registerAgent(ctx, client, handler)
+		if err != nil {
+			return exitError, err
+		}
+		defer unregister()
 	}
-	unregister, err := registerAgent(ctx, client, handler)
-	if err != nil {
-		return exitError, err
-	}
-	defer unregister()
 
 	return executeCommand(ctx, client, menu, opts.verbose, parsed)
+}
+
+// commandCanPair reports whether a subcommand may start a pairing and
+// therefore needs a pairing agent.
+func commandCanPair(name string) bool {
+	switch name {
+	case "connect", "scan", "pick":
+		return true
+	}
+	return false
 }
 
 // isTerminal reports whether f is a character device (a terminal).

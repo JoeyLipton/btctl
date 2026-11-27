@@ -31,7 +31,22 @@ func (c *Client) RegisterAgent(ctx context.Context, agent *Agent) error {
 		_ = c.conn.Export(nil, agentPath, agentInterface)
 		return fmt.Errorf("register agent: request default: %w", err)
 	}
+	c.mu.Lock()
+	c.agent = agent
+	c.mu.Unlock()
 	return nil
+}
+
+// expectPairing tells the registered agent (if any) to accept pairing
+// requests for path until the returned function is called.
+func (c *Client) expectPairing(path dbus.ObjectPath) (release func()) {
+	c.mu.Lock()
+	agent := c.agent
+	c.mu.Unlock()
+	if agent == nil {
+		return func() {}
+	}
+	return agent.Expect(path)
 }
 
 // UnregisterAgent removes the agent registration from BlueZ and tears down
@@ -43,6 +58,11 @@ func (c *Client) UnregisterAgent(ctx context.Context, agent *Agent) error {
 	if agent == nil {
 		return nil
 	}
+	c.mu.Lock()
+	if c.agent == agent {
+		c.agent = nil
+	}
+	c.mu.Unlock()
 	err := c.callCtx(ctx, bluezBasePath, agentManagerIface, "UnregisterAgent", agentPath)
 	if err != nil && !isDBusError(err, errNameServiceUnknown) {
 		return fmt.Errorf("unregister agent: %w", err)
@@ -61,6 +81,7 @@ func (c *Client) PairDevice(ctx context.Context, path dbus.ObjectPath) error {
 	if c == nil || c.conn == nil {
 		return fmt.Errorf("pair device: bluetooth client is not connected")
 	}
+	defer c.expectPairing(path)()
 
 	c.trustWithWarning(ctx, path, string(path))
 
@@ -110,6 +131,9 @@ func (c *Client) Connect(ctx context.Context, path dbus.ObjectPath) error {
 // connectDirect is identical to Connect but without connLock. Menu callers
 // that hold connLock externally use this to avoid double-locking.
 func (c *Client) connectDirect(ctx context.Context, path dbus.ObjectPath) error {
+	// Connecting a device whose bond was lost makes BlueZ pair again.
+	defer c.expectPairing(path)()
+
 	wasAlreadyBonded, err := c.isDeviceBonded(ctx, path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%swarning: read bonded %s: %v\n", stderrPrefix, path, err)

@@ -80,18 +80,63 @@ type PairingHandler interface {
 
 // Agent implements the org.bluez.Agent1 D-Bus interface on top of a
 // PairingHandler. Only methods returning *dbus.Error are exported on the bus.
+//
+// btctl registers as BlueZ's default agent, so BlueZ routes every pairing
+// request to it, including ones started by other nearby devices. The agent
+// therefore only consults the handler for devices btctl is currently pairing
+// or connecting (see Expect) and rejects everything else.
 type Agent struct {
 	handler PairingHandler
 
 	mu       sync.Mutex
 	nextID   int
 	inflight map[int]context.CancelFunc
+	expected map[dbus.ObjectPath]int
 }
 
 // NewAgent returns an Agent that consults handler. The caller must invoke
 // Client.RegisterAgent to register it with BlueZ.
 func NewAgent(handler PairingHandler) *Agent {
-	return &Agent{handler: handler, inflight: make(map[int]context.CancelFunc)}
+	return &Agent{
+		handler:  handler,
+		inflight: make(map[int]context.CancelFunc),
+		expected: make(map[dbus.ObjectPath]int),
+	}
+}
+
+// Expect allows pairing requests for device until release is called. The
+// Client calls it around its own Pair and Connect calls.
+func (a *Agent) Expect(device dbus.ObjectPath) (release func()) {
+	a.mu.Lock()
+	a.expected[device]++
+	a.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.mu.Lock()
+			if a.expected[device]--; a.expected[device] <= 0 {
+				delete(a.expected, device)
+			}
+			a.mu.Unlock()
+		})
+	}
+}
+
+// expects reports whether btctl is currently pairing or connecting device.
+func (a *Agent) expects(device dbus.ObjectPath) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.expected[device] > 0
+}
+
+// rejectUnexpected returns the reply for a request about a device btctl did
+// not ask to pair with, or nil when the request may proceed.
+func (a *Agent) rejectUnexpected(device dbus.ObjectPath, method string) *dbus.Error {
+	if a.expects(device) {
+		return nil
+	}
+	agentLogVerbose("rejecting %s from %s: not a device btctl is pairing", method, device)
+	return dbus.NewError(errNameRejected, []any{"Not expecting a pairing request for this device"})
 }
 
 // begin starts tracking a request and returns its context and a release func.
@@ -121,7 +166,10 @@ func (a *Agent) cancelInflight() {
 
 // confirm runs a yes/no request through the handler and maps the answer to
 // the D-Bus reply BlueZ expects.
-func (a *Agent) confirm(req PairingRequest) *dbus.Error {
+func (a *Agent) confirm(req PairingRequest, method string) *dbus.Error {
+	if err := a.rejectUnexpected(req.Device, method); err != nil {
+		return err
+	}
 	ctx, done := a.begin()
 	defer done()
 	accepted := a.handler != nil && a.handler.Confirm(ctx, req)
@@ -150,7 +198,10 @@ func (a *Agent) Release() *dbus.Error {
 }
 
 // input asks the handler for a passkey or PIN and validates the answer.
-func (a *Agent) input(req PairingRequest, valid func(string) bool) (string, *dbus.Error) {
+func (a *Agent) input(req PairingRequest, method string, valid func(string) bool) (string, *dbus.Error) {
+	if err := a.rejectUnexpected(req.Device, method); err != nil {
+		return "", err
+	}
 	ctx, done := a.begin()
 	defer done()
 	var value string
@@ -171,12 +222,15 @@ func (a *Agent) input(req PairingRequest, valid func(string) bool) (string, *dbu
 // RequestPinCode asks for the PIN of a legacy (pre-2.1) device.
 func (a *Agent) RequestPinCode(device dbus.ObjectPath) (string, *dbus.Error) {
 	agentLogVerbose("RequestPinCode from %s", device)
-	return a.input(PairingRequest{Kind: PairingEnterPinCode, Device: device, Address: deviceLabelFromPath(device)}, validPinCode)
+	return a.input(PairingRequest{Kind: PairingEnterPinCode, Device: device, Address: deviceLabelFromPath(device)}, "RequestPinCode", validPinCode)
 }
 
 // DisplayPinCode shows a PIN the user must type on the device.
 func (a *Agent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Error {
 	agentLogVerbose("DisplayPinCode for %s: %s", device, pincode)
+	if err := a.rejectUnexpected(device, "DisplayPinCode"); err != nil {
+		return err
+	}
 	if a.handler != nil {
 		a.handler.Display(PairingRequest{Kind: PairingDisplayPinCode, Device: device, Address: deviceLabelFromPath(device), PinCode: pincode})
 	}
@@ -186,7 +240,7 @@ func (a *Agent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Err
 // RequestPasskey asks for the 6-digit passkey shown on the device.
 func (a *Agent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
 	agentLogVerbose("RequestPasskey from %s", device)
-	value, err := a.input(PairingRequest{Kind: PairingEnterPasskey, Device: device, Address: deviceLabelFromPath(device)}, validPasskey)
+	value, err := a.input(PairingRequest{Kind: PairingEnterPasskey, Device: device, Address: deviceLabelFromPath(device)}, "RequestPasskey", validPasskey)
 	if err != nil {
 		return 0, err
 	}
@@ -198,6 +252,9 @@ func (a *Agent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
 // calls it again with a growing entered count as keys are typed.
 func (a *Agent) DisplayPasskey(device dbus.ObjectPath, passkey uint32, entered uint16) *dbus.Error {
 	agentLogVerbose("DisplayPasskey for %s: %06d (entered: %d)", device, passkey, entered)
+	if err := a.rejectUnexpected(device, "DisplayPasskey"); err != nil {
+		return err
+	}
 	if a.handler != nil {
 		a.handler.Display(PairingRequest{Kind: PairingDisplayPasskey, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey, Entered: entered})
 	}
@@ -233,19 +290,22 @@ func validPinCode(s string) bool {
 // RequestConfirmation handles Secure Simple Pairing numeric comparison.
 func (a *Agent) RequestConfirmation(device dbus.ObjectPath, passkey uint32) *dbus.Error {
 	agentLogVerbose("RequestConfirmation from %s, passkey: %06d", device, passkey)
-	return a.confirm(PairingRequest{Kind: PairingConfirm, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey})
+	return a.confirm(PairingRequest{Kind: PairingConfirm, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey}, "RequestConfirmation")
 }
 
 // RequestAuthorization handles Just Works pairing authorization.
 func (a *Agent) RequestAuthorization(device dbus.ObjectPath) *dbus.Error {
 	agentLogVerbose("RequestAuthorization from %s", device)
-	return a.confirm(PairingRequest{Kind: PairingAuthorize, Device: device, Address: deviceLabelFromPath(device)})
+	return a.confirm(PairingRequest{Kind: PairingAuthorize, Device: device, Address: deviceLabelFromPath(device)}, "RequestAuthorization")
 }
 
-// AuthorizeService accepts per-profile access for paired devices.
+// AuthorizeService lets the device btctl is connecting use its profiles.
+// BlueZ only asks for untrusted devices; requests from any other device are
+// rejected, since accepting them would let any untrusted device in while
+// btctl happens to be running.
 func (a *Agent) AuthorizeService(device dbus.ObjectPath, uuid string) *dbus.Error {
 	agentLogVerbose("AuthorizeService from %s, uuid: %s", device, uuid)
-	return nil
+	return a.rejectUnexpected(device, "AuthorizeService")
 }
 
 // Cancel aborts the requests currently in progress. Later requests are

@@ -20,13 +20,15 @@ func (f funcHandler) Confirm(ctx context.Context, req PairingRequest) bool { ret
 func (f funcHandler) Display(PairingRequest)                               {}
 func (f funcHandler) Input(context.Context, PairingRequest) (string, bool) { return "", false }
 
-// registerTestAgent registers an agent backed by handler on client.
+// registerTestAgent registers an agent backed by handler on client and lets
+// it accept requests for testDevice, as if btctl were pairing it.
 func registerTestAgent(t *testing.T, client *Client, handler PairingHandler) *Agent {
 	t.Helper()
 	agent := NewAgent(handler)
 	if err := client.RegisterAgent(testContext(t), agent); err != nil {
 		t.Fatalf("RegisterAgent: %v", err)
 	}
+	t.Cleanup(agent.Expect(testDevice))
 	t.Cleanup(func() { _ = client.UnregisterAgent(context.Background(), agent) })
 	return agent
 }

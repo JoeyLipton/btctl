@@ -32,6 +32,7 @@ type Client struct {
 	strictAdapter   bool       // fail instead of falling back when adapterName is missing
 	activeAdapter   dbus.ObjectPath
 	connectionLocks map[dbus.ObjectPath]*sync.Mutex
+	agent           *Agent // registered pairing agent, if any
 }
 
 // Options configures New.
