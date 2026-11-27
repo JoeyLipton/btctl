@@ -30,7 +30,7 @@ func runList(ctx context.Context, client *bluez.Client, verbose bool) (int, erro
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	for _, d := range devices {
-		line := fmt.Sprintf("[%-9s]\t%s\t%s", d.Status(), d.Name, d.Address)
+		line := fmt.Sprintf("[%-9s]\t%s\t%s", d.Status(), d.DisplayName(), d.Address)
 		if d.Battery >= 0 {
 			line += fmt.Sprintf("\t%d%%", d.Battery)
 		}

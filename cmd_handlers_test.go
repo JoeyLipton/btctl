@@ -147,3 +147,12 @@ func TestStatusOutput(t *testing.T) {
 		t.Error("-v status wrote nothing to stderr; -v used to be silently ignored for status")
 	}
 }
+
+func TestListShowsUnnamedDevices(t *testing.T) {
+	fake := newCLIFake(t)
+	fake.AddDevice(fakebluez.Device{Address: "AA:AA:AA:AA:AA:09", Paired: true, Battery: -1})
+	_, stdout, _ := runCLI(t, "list")
+	if !strings.Contains(stdout, "[paired   ]  (unknown)  AA:AA:AA:AA:AA:09") {
+		t.Errorf("list output for an unnamed device = %q", stdout)
+	}
+}
