@@ -35,7 +35,7 @@ const helpText = `btctl - a minimal Bluetooth manager for Linux
 Usage:
   btctl [-v] [-a <hciN>] <command> [options]
 
-Global options:
+Global options (accepted anywhere on the command line):
   -v, --verbose          Log every D-Bus call to stderr
   -a, --adapter <hciN>   Use this adapter for this run (overrides adapter select)
   -h, --help             Show this help page
@@ -93,7 +93,7 @@ Trust and auto-reconnect:
     btctl untrust AA:BB:CC:DD:EE:FF
 
   To check trust status:
-    btctl list       (Trusted column visible with -v flag)
+    btctl list -v    (adds a trusted/untrusted column)
 
   Trust is a permanent setting stored by BlueZ and persists across reboots.
   Forgetting a device (btctl forget) removes both the pairing and trust.
@@ -147,10 +147,6 @@ func runMain(args []string) int {
 		fmt.Fprint(os.Stderr, usageText)
 		return exitUsage
 	}
-	// status feeds status bars, which must never see stderr noise.
-	if len(args) > 0 && args[0] == "status" {
-		opts.verbose = false
-	}
 	bluetooth.SetVerbose(opts.verbose)
 
 	if len(args) == 0 {
@@ -183,35 +179,35 @@ type globalOptions struct {
 	adapter string // from -a/--adapter; "" when not given
 }
 
-// parseGlobalFlags consumes leading global flags and returns the rest.
+// parseGlobalFlags removes the global flags (-v, -a) from args, wherever
+// they appear, and returns the rest. "--" ends flag parsing.
 func parseGlobalFlags(args []string) (globalOptions, []string, error) {
 	var opts globalOptions
-	for len(args) > 0 {
-		a := args[0]
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
+		case a == "--":
+			rest = append(rest, args[i+1:]...)
+			i = len(args)
 		case a == "-v" || a == "--verbose":
 			opts.verbose = true
-			args = args[1:]
 		case a == "-a" || a == "--adapter":
-			if len(args) < 2 {
+			if i+1 >= len(args) {
 				return opts, nil, fmt.Errorf("%s requires an adapter name (e.g. hci0)", a)
 			}
-			opts.adapter = args[1]
-			args = args[2:]
+			opts.adapter = args[i+1]
+			i++
 		case strings.HasPrefix(a, "--adapter="):
 			opts.adapter = strings.TrimPrefix(a, "--adapter=")
-			args = args[1:]
 		default:
-			if opts.adapter != "" && !hciNameRegex.MatchString(opts.adapter) {
-				return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
-			}
-			return opts, args, nil
+			rest = append(rest, a)
 		}
 	}
 	if opts.adapter != "" && !hciNameRegex.MatchString(opts.adapter) {
 		return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
 	}
-	return opts, args, nil
+	return opts, rest, nil
 }
 
 // clientOptions builds the bluetooth.Options for this run. An adapter given

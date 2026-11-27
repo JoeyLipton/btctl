@@ -117,3 +117,33 @@ func TestScanPromptPairsAndConnects(t *testing.T) {
 		}
 	}
 }
+
+func TestListVerboseFlagAfterCommand(t *testing.T) {
+	fake := newCLIFake(t)
+	fake.AddDevice(fakebluez.Device{Address: "AA:AA:AA:AA:AA:06", Name: "Mouse", Paired: true, Trusted: true, Battery: 55})
+
+	code, stdout, stderr := runCLI(t, "list", "-v")
+	if code != exitSuccess {
+		t.Fatalf("list -v exited %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Mouse") || !strings.Contains(stdout, "55%") || !strings.Contains(stdout, "trusted") {
+		t.Errorf("list -v output lacks the trusted column:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "[v] call:") {
+		t.Errorf("-v after the command did not enable verbose logging:\n%s", stderr)
+	}
+}
+
+func TestStatusOutput(t *testing.T) {
+	fake := newCLIFake(t)
+	fake.AddDevice(fakebluez.Device{Address: "AA:AA:AA:AA:AA:07", Name: "Headphones", Paired: true, Connected: true, Battery: -1})
+	fake.AddDevice(fakebluez.Device{Address: "AA:AA:AA:AA:AA:08", Name: "Mouse", Paired: true, Battery: -1})
+
+	code, stdout, stderr := runCLI(t, "status")
+	if code != exitSuccess || stdout != "[BT] 1\nHeadphones\tAA:AA:AA:AA:AA:07\n" || stderr != "" {
+		t.Errorf("status = %d %q %q", code, stdout, stderr)
+	}
+	if _, _, stderr := runCLI(t, "-v", "status"); stderr == "" {
+		t.Error("-v status wrote nothing to stderr; -v used to be silently ignored for status")
+	}
+}

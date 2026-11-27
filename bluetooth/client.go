@@ -388,12 +388,12 @@ func getObjectProperty(props map[string]dbus.Variant, key string, out interface{
 
 // parseDevice extracts a Device from a property map.
 func parseDevice(path dbus.ObjectPath, props map[string]dbus.Variant, ifaces map[string]map[string]dbus.Variant) Device {
-	name := "Unknown"
-	if getObjectProperty(props, "Name", &name) && name == "" {
-		name = "Unknown"
-	}
 	addr := ""
 	getObjectProperty(props, "Address", &addr)
+	name := deviceName(props, addr)
+	if name == "" {
+		name = "Unknown"
+	}
 	var connected, paired, trusted bool
 	getObjectProperty(props, propConnected, &connected)
 	getObjectProperty(props, propPaired, &paired)
@@ -410,6 +410,33 @@ func parseDevice(path dbus.ObjectPath, props map[string]dbus.Variant, ifaces map
 		Battery:   batteryFromInterfaces(ifaces),
 		RSSI:      rssi,
 	}
+}
+
+// deviceName returns the name to show for a device from a set of Device1
+// properties, or "" when it has none. Alias wins over Name because it
+// reflects names the user set (bluetoothctl set-alias, GNOME Settings); BlueZ
+// falls back to Name for it. For a device with no name at all BlueZ sets
+// Alias to the address with dashes, which is not a name.
+func deviceName(props map[string]dbus.Variant, address string) string {
+	var alias string
+	if getObjectProperty(props, "Alias", &alias) && alias != "" && !aliasIsAddress(alias, address) {
+		return alias
+	}
+	var name string
+	if getObjectProperty(props, "Name", &name) {
+		return name
+	}
+	return ""
+}
+
+// aliasIsAddress reports whether alias is BlueZ's placeholder for a device
+// without a name: its address with dashes (or colons) as separators.
+func aliasIsAddress(alias, address string) bool {
+	normalized := strings.ReplaceAll(alias, "-", ":")
+	if address != "" {
+		return strings.EqualFold(normalized, address)
+	}
+	return len(normalized) == 17 && strings.Count(normalized, ":") == 5
 }
 
 // batteryFromInterfaces reads Percentage from org.bluez.Battery1 when present.

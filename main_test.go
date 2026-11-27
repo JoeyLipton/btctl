@@ -83,6 +83,9 @@ func TestParseGlobalFlags(t *testing.T) {
 		{args: []string{"-v", "list"}, wantVerbose: true, wantRest: "list"},
 		{args: []string{"-a", "hci1", "scan"}, wantAdapter: "hci1", wantRest: "scan"},
 		{args: []string{"--adapter=hci2", "-v", "status"}, wantVerbose: true, wantAdapter: "hci2", wantRest: "status"},
+		{args: []string{"list", "-v"}, wantVerbose: true, wantRest: "list"},
+		{args: []string{"adapter", "-a", "hci1", "status", "--verbose"}, wantVerbose: true, wantAdapter: "hci1", wantRest: "adapter status"},
+		{args: []string{"pick", "-c", "x.rasi", "--", "-v"}, wantRest: "pick -c x.rasi -v"},
 		{args: []string{"-a"}, wantErr: true},
 		{args: []string{"-a", "eth0", "list"}, wantErr: true},
 	}

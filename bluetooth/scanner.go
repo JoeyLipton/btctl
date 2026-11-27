@@ -212,8 +212,7 @@ func (s *scanState) propertiesChanged(path dbus.ObjectPath, changed map[string]d
 			return
 		}
 		delete(s.cached, path)
-		var name string
-		if getObjectProperty(changed, "Name", &name) && name != "" {
+		if name := deviceName(changed, d.Address); name != "" {
 			d.Name = name
 		}
 		var rssi int16
@@ -232,8 +231,8 @@ func (s *scanState) propertiesChanged(path dbus.ObjectPath, changed map[string]d
 	if !ok || state.emittedUpdated || !isUnknownName(state.device.Name) {
 		return
 	}
-	var name string
-	if !getObjectProperty(changed, "Name", &name) || name == "" {
+	name := deviceName(changed, state.device.Address)
+	if name == "" {
 		return
 	}
 	state.device.Name = name

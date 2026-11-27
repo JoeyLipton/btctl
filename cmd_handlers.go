@@ -53,8 +53,8 @@ func trustedLabel(trusted bool) string {
 	return "untrusted"
 }
 
-// runStatus owns its own client lifecycle so it never emits anything on
-// stderr in normal (non-verbose) mode. It always exits 0.
+// runStatus owns its own client lifecycle so it never writes to stderr unless
+// -v was given, which keeps status bars clean. It always exits 0.
 func runStatus(copts bluetooth.Options) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bluetooth.StatusClientTimeout())
 	defer cancel()
