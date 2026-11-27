@@ -57,6 +57,37 @@ func (p menuPairing) Confirm(ctx context.Context, req PairingRequest) bool {
 	return p.m.confirmPairingPrompt(ctx, name, req)
 }
 
+// Display raises a notification with the code the user must type on the
+// device; the picker cannot show it while BlueZ waits for the keystrokes.
+func (p menuPairing) Display(req PairingRequest) {
+	if req.Entered > 0 {
+		return // BlueZ repeats DisplayPasskey for every key typed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.m.client.timeouts.call)
+	defer cancel()
+	msg := fmt.Sprintf("Type %s on %s, then press Enter", req.Code(), p.m.client.getDeviceName(ctx, req.Device))
+	menuStderr("%s", msg)
+	notifyAlert("btctl - pairing code", msg)
+}
+
+// Input asks for a passkey or PIN with a free-text picker. For PINs the
+// conventional 0000 is offered as a ready-made choice.
+func (p menuPairing) Input(ctx context.Context, req PairingRequest) (string, bool) {
+	name := p.m.client.getDeviceName(ctx, req.Device)
+	title := "Enter the passkey shown on " + name
+	var lines []string
+	if req.Kind == PairingEnterPinCode {
+		title = "Enter the PIN for " + name
+		lines = []string{defaultPinCode}
+	}
+	notifyAlert("btctl - pairing request", title)
+	value, err := p.m.promptContext(ctx, title, lines)
+	if err != nil || value == "" {
+		return "", false
+	}
+	return value, true
+}
+
 // confirmPairingPrompt opens the yes/no confirmation picker for an
 // in-flight pairing request and returns true iff the user accepted.
 func (m *Menu) confirmPairingPrompt(ctx context.Context, name string, req PairingRequest) bool {

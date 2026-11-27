@@ -10,9 +10,13 @@
 package bluetooth
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -28,6 +32,16 @@ const (
 	// PairingAuthorize asks whether to allow a pairing that has no passkey
 	// (Just Works).
 	PairingAuthorize
+	// PairingDisplayPasskey shows Passkey, which the user types on the device
+	// (typically a keyboard). BlueZ repeats it as keys are typed (Entered).
+	PairingDisplayPasskey
+	// PairingDisplayPinCode shows PinCode, which the user types on the device.
+	PairingDisplayPinCode
+	// PairingEnterPasskey asks for the 6-digit passkey shown on the device.
+	PairingEnterPasskey
+	// PairingEnterPinCode asks for the device's PIN (legacy devices; usually
+	// 0000 or 1234, or a code the user then types on the device).
+	PairingEnterPinCode
 )
 
 // PairingRequest describes one call BlueZ made into the agent.
@@ -35,7 +49,18 @@ type PairingRequest struct {
 	Kind    PairingKind
 	Device  dbus.ObjectPath
 	Address string // MAC address derived from Device
-	Passkey uint32 // for PairingConfirm
+	Passkey uint32 // PairingConfirm and PairingDisplayPasskey
+	PinCode string // PairingDisplayPinCode
+	Entered uint16 // PairingDisplayPasskey: digits typed on the device so far
+}
+
+// Code returns the passkey or PIN to show the user, formatted as BlueZ
+// expects it to be typed (passkeys are always six digits).
+func (r PairingRequest) Code() string {
+	if r.Kind == PairingDisplayPinCode {
+		return r.PinCode
+	}
+	return fmt.Sprintf("%06d", r.Passkey)
 }
 
 // PairingHandler decides pairing requests. Its methods are called from D-Bus
@@ -45,6 +70,12 @@ type PairingHandler interface {
 	// Confirm returns true to accept a PairingConfirm or PairingAuthorize
 	// request.
 	Confirm(ctx context.Context, req PairingRequest) bool
+	// Display shows the code of a PairingDisplayPasskey or
+	// PairingDisplayPinCode request; the user must type it on the device.
+	Display(req PairingRequest)
+	// Input asks the user for a passkey or PIN (PairingEnterPasskey,
+	// PairingEnterPinCode). ok=false rejects the pairing.
+	Input(ctx context.Context, req PairingRequest) (value string, ok bool)
 }
 
 // Agent implements the org.bluez.Agent1 D-Bus interface on top of a
@@ -104,14 +135,8 @@ func (a *Agent) confirm(req PairingRequest) *dbus.Error {
 	}
 }
 
-// agentLogAlways writes unconditionally. Use for rare but significant
-// events: PIN entry, passkey confirmation, authorization requests.
-func agentLogAlways(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "[agent] "+format+"\n", args...)
-}
-
-// agentLogVerbose writes only when the package verbose flag is set.
-// Use for high-frequency events: AuthorizeService, DisplayPasskey.
+// agentLogVerbose writes only when the package verbose flag is set. What the
+// user must act on is shown by the PairingHandler, not logged here.
 func agentLogVerbose(format string, args ...interface{}) {
 	if notifyVerbose {
 		fmt.Fprintf(os.Stderr, "[agent] "+format+"\n", args...)
@@ -124,41 +149,96 @@ func (a *Agent) Release() *dbus.Error {
 	return nil
 }
 
-// RequestPinCode handles legacy PIN-based pairing.
+// input asks the handler for a passkey or PIN and validates the answer.
+func (a *Agent) input(req PairingRequest, valid func(string) bool) (string, *dbus.Error) {
+	ctx, done := a.begin()
+	defer done()
+	var value string
+	ok := false
+	if a.handler != nil {
+		value, ok = a.handler.Input(ctx, req)
+	}
+	value = strings.TrimSpace(value)
+	switch {
+	case ctx.Err() != nil:
+		return "", dbus.NewError(errNameCanceled, []any{"Canceled"})
+	case !ok || !valid(value):
+		return "", dbus.NewError(errNameRejected, []any{"Rejected"})
+	}
+	return value, nil
+}
+
+// RequestPinCode asks for the PIN of a legacy (pre-2.1) device.
 func (a *Agent) RequestPinCode(device dbus.ObjectPath) (string, *dbus.Error) {
-	agentLogAlways("RequestPinCode from %s", device)
-	return defaultPinCode, nil
+	agentLogVerbose("RequestPinCode from %s", device)
+	return a.input(PairingRequest{Kind: PairingEnterPinCode, Device: device, Address: deviceLabelFromPath(device)}, validPinCode)
 }
 
-// DisplayPinCode logs a PIN chosen by BlueZ.
+// DisplayPinCode shows a PIN the user must type on the device.
 func (a *Agent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Error {
-	agentLogAlways("PIN for %s: %s", device, pincode)
+	agentLogVerbose("DisplayPinCode for %s: %s", device, pincode)
+	if a.handler != nil {
+		a.handler.Display(PairingRequest{Kind: PairingDisplayPinCode, Device: device, Address: deviceLabelFromPath(device), PinCode: pincode})
+	}
 	return nil
 }
 
-// RequestPasskey handles legacy passkey entry flows. Passkey entry is not
-// supported yet, so the request is rejected immediately rather than left to
-// time out.
+// RequestPasskey asks for the 6-digit passkey shown on the device.
 func (a *Agent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
-	agentLogAlways("RequestPasskey from %s", device)
-	return 0, dbus.NewError(errNameRejected, []any{"Passkey entry not supported"})
+	agentLogVerbose("RequestPasskey from %s", device)
+	value, err := a.input(PairingRequest{Kind: PairingEnterPasskey, Device: device, Address: deviceLabelFromPath(device)}, validPasskey)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := strconv.ParseUint(value, 10, 32) // validPasskey guarantees success
+	return uint32(n), nil
 }
 
-// DisplayPasskey logs a passkey for the user to verify.
+// DisplayPasskey shows a passkey the user must type on the device. BlueZ
+// calls it again with a growing entered count as keys are typed.
 func (a *Agent) DisplayPasskey(device dbus.ObjectPath, passkey uint32, entered uint16) *dbus.Error {
-	agentLogVerbose("Passkey for %s: %d (entered: %d)", device, passkey, entered)
+	agentLogVerbose("DisplayPasskey for %s: %06d (entered: %d)", device, passkey, entered)
+	if a.handler != nil {
+		a.handler.Display(PairingRequest{Kind: PairingDisplayPasskey, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey, Entered: entered})
+	}
 	return nil
+}
+
+// validPasskey accepts 1-6 decimal digits (BlueZ passkeys are 0-999999).
+func validPasskey(s string) bool {
+	if len(s) == 0 || len(s) > 6 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// validPinCode accepts the 1-16 printable ASCII characters BlueZ allows.
+func validPinCode(s string) bool {
+	if len(s) == 0 || len(s) > 16 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // RequestConfirmation handles Secure Simple Pairing numeric comparison.
 func (a *Agent) RequestConfirmation(device dbus.ObjectPath, passkey uint32) *dbus.Error {
-	agentLogAlways("RequestConfirmation from %s, passkey: %06d", device, passkey)
+	agentLogVerbose("RequestConfirmation from %s, passkey: %06d", device, passkey)
 	return a.confirm(PairingRequest{Kind: PairingConfirm, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey})
 }
 
 // RequestAuthorization handles Just Works pairing authorization.
 func (a *Agent) RequestAuthorization(device dbus.ObjectPath) *dbus.Error {
-	agentLogAlways("RequestAuthorization from %s", device)
+	agentLogVerbose("RequestAuthorization from %s", device)
 	return a.confirm(PairingRequest{Kind: PairingAuthorize, Device: device, Address: deviceLabelFromPath(device)})
 }
 
@@ -176,13 +256,74 @@ func (a *Agent) Cancel() *dbus.Error {
 	return nil
 }
 
-// AutoConfirmHandler accepts every request. Non-interactive commands use it
-// because there is no picker to ask the user.
-type AutoConfirmHandler struct{}
+// CLIHandler answers pairing requests for the command-line commands. There is
+// no picker, so confirmations are accepted; codes the user must type on the
+// device are printed and raised as notifications; passkeys and PINs are read
+// from the terminal when there is one.
+type CLIHandler struct {
+	In          io.Reader // nil means os.Stdin
+	Out         io.Writer // nil means os.Stderr
+	Interactive bool      // In is a terminal the user can type into
+}
+
+func (h CLIHandler) out() io.Writer {
+	if h.Out == nil {
+		return os.Stderr
+	}
+	return h.Out
+}
 
 // Confirm accepts the request and tells the user it did so.
-func (AutoConfirmHandler) Confirm(_ context.Context, req PairingRequest) bool {
-	agentLogVerbose("auto-confirming pairing request from %s", req.Address)
+func (h CLIHandler) Confirm(_ context.Context, req PairingRequest) bool {
+	if req.Kind == PairingConfirm {
+		fmt.Fprintf(h.out(), "%sconfirming pairing with %s (passkey %06d)\n", stderrPrefix, req.Address, req.Passkey)
+	} else {
+		fmt.Fprintf(h.out(), "%saccepting pairing with %s\n", stderrPrefix, req.Address)
+	}
 	notify(notifyAppName, "Auto-authorized connection from "+req.Address)
 	return true
+}
+
+// Display prints the code once and raises a notification.
+func (h CLIHandler) Display(req PairingRequest) {
+	if req.Entered > 0 {
+		return // BlueZ repeats DisplayPasskey for every key typed
+	}
+	msg := fmt.Sprintf("Type %s on %s, then press Enter", req.Code(), req.Address)
+	fmt.Fprintf(h.out(), "%s%s\n", stderrPrefix, msg)
+	notifyAlert("btctl - pairing code", msg)
+}
+
+// Input reads a passkey or PIN from the terminal. Without one, a PIN request
+// falls back to the conventional 0000 and a passkey request is rejected.
+func (h CLIHandler) Input(ctx context.Context, req PairingRequest) (string, bool) {
+	if !h.Interactive {
+		if req.Kind == PairingEnterPinCode {
+			fmt.Fprintf(h.out(), "%s%s asked for a PIN; trying %s\n", stderrPrefix, req.Address, defaultPinCode)
+			return defaultPinCode, true
+		}
+		fmt.Fprintf(h.out(), "%s%s needs the passkey shown on it, but there is no terminal to type it into; use btctl pick\n", stderrPrefix, req.Address)
+		return "", false
+	}
+	what := "the 6-digit passkey shown on"
+	if req.Kind == PairingEnterPinCode {
+		what = "the PIN for (often " + defaultPinCode + ")"
+	}
+	fmt.Fprintf(h.out(), "%sEnter %s %s: ", stderrPrefix, what, req.Address)
+	in := h.In
+	if in == nil {
+		in = os.Stdin
+	}
+	lineCh := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		lineCh <- line
+	}()
+	select {
+	case line := <-lineCh:
+		return strings.TrimSpace(line), true
+	case <-ctx.Done():
+		fmt.Fprintln(h.out())
+		return "", false
+	}
 }

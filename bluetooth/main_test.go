@@ -15,8 +15,9 @@ func TestMain(m *testing.M) {
 
 // fakePickerScript stands in for rofi and dmenu. Each invocation logs its
 // arguments and input, then answers with the next step from the steps file:
-// an extended regex selecting the first matching input line, or ESC to exit
-// 1 as if the user pressed Escape. FAKE_PICKER_SLEEP delays the answer.
+// an extended regex selecting the first matching input line, TYPE:<text> to
+// answer with free text, or ESC to exit 1 as if the user pressed Escape.
+// FAKE_PICKER_SLEEP delays the answer.
 const fakePickerScript = `#!/bin/sh
 input=$(cat)
 printf 'ARGS: %s\n%s\n---\n' "$*" "$input" >> "$FAKE_PICKER_LOG"
@@ -26,6 +27,7 @@ n=$((n + 1))
 echo "$n" > "$FAKE_PICKER_STEPS.n"
 step=$(sed -n "${n}p" "$FAKE_PICKER_STEPS")
 if [ -z "$step" ] || [ "$step" = ESC ]; then exit 1; fi
+case "$step" in TYPE:*) printf '%s\n' "${step#TYPE:}"; exit 0;; esac
 line=$(printf '%s\n' "$input" | grep -m1 -E -- "$step") || exit 1
 printf '%s\n' "$line"
 `

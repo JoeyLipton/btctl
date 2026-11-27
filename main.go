@@ -269,7 +269,7 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	// The menu answers pairing requests with pickers; every other command
 	// has nobody to ask, so it accepts them.
 	var menu *bluetooth.Menu
-	var handler bluetooth.PairingHandler = bluetooth.AutoConfirmHandler{}
+	var handler bluetooth.PairingHandler = bluetooth.CLIHandler{Interactive: isTerminal(os.Stdin)}
 	if parsed.name == "pick" {
 		menu = bluetooth.NewMenu(client, parsed.pickCfg)
 		handler = menu.PairingHandler()
@@ -281,6 +281,12 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	defer unregister()
 
 	return executeCommand(ctx, client, menu, opts.verbose, parsed)
+}
+
+// isTerminal reports whether f is a character device (a terminal).
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // registerAgent registers a pairing agent backed by handler and returns a

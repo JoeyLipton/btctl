@@ -12,10 +12,13 @@ import (
 	"github.com/joeylipton/btctl/internal/fakebluez"
 )
 
-// funcHandler adapts a function to PairingHandler.
+// funcHandler adapts a function to PairingHandler; it never displays codes
+// and rejects input requests.
 type funcHandler func(ctx context.Context, req PairingRequest) bool
 
 func (f funcHandler) Confirm(ctx context.Context, req PairingRequest) bool { return f(ctx, req) }
+func (f funcHandler) Display(PairingRequest)                               {}
+func (f funcHandler) Input(context.Context, PairingRequest) (string, bool) { return "", false }
 
 // registerTestAgent registers an agent backed by handler on client.
 func registerTestAgent(t *testing.T, client *Client, handler PairingHandler) *Agent {
