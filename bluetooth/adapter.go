@@ -2,7 +2,8 @@
 // adapters, tracking the active one, reading its status, and toggling Powered
 // and Discoverable. Powering on includes a single rfkill-unblock recovery
 // attempt, because a soft-blocked adapter is the common reason a Powered=true
-// write fails and BlueZ does not unblock rfkill itself.
+// write fails and BlueZ neither unblocks rfkill nor powers the adapter after
+// an unblock by itself.
 package bluetooth
 
 import (
@@ -101,24 +102,40 @@ func (c *Client) SetAdapterPowered(ctx context.Context, powered bool) error {
 	if err != nil {
 		return fmt.Errorf("set adapter powered: %w", err)
 	}
-	return c.setAdapterPowered(ctx, path, powered, false)
+	return c.setAdapterPowered(ctx, path, powered)
 }
 
-func (c *Client) setAdapterPowered(ctx context.Context, path dbus.ObjectPath, powered bool, retried bool) error {
+func (c *Client) setAdapterPowered(ctx context.Context, path dbus.ObjectPath, powered bool) error {
 	err := c.setAdapterProperty(ctx, path, propAdapterPowered, powered)
 	if err == nil {
 		return nil
 	}
-	if retried || !adapterPoweredNeedsRecovery(err) {
+	if !powered || !adapterPoweredNeedsRecovery(err) {
 		return fmt.Errorf("set adapter powered %s: %w", path, err)
 	}
 	if c.verbose {
-		fmt.Fprintln(os.Stderr, stderrPrefix+"rfkill unblock attempted")
+		fmt.Fprintln(os.Stderr, stderrPrefix+"adapter is blocked; running rfkill unblock bluetooth")
 	}
-	if rfErr := c.tryRfkillUnblock(ctx); rfErr != nil {
-		return fmt.Errorf("set adapter powered %s: %w", path, err)
+	if rfErr := c.rfkillUnblock(ctx); rfErr != nil {
+		return fmt.Errorf("set adapter powered %s: %w (rfkill unblock failed: %v)", path, err, rfErr)
 	}
-	return c.setAdapterPowered(ctx, path, powered, true)
+	// Unblocking does not power the adapter, and the kernel and BlueZ need a
+	// moment before it accepts Powered=true, so retry briefly.
+	deadline := time.Now().Add(rfkillRecoveryTimeout)
+	for {
+		err = c.setAdapterProperty(ctx, path, propAdapterPowered, true)
+		if err == nil {
+			return nil
+		}
+		if !adapterPoweredNeedsRecovery(err) || time.Now().After(deadline) {
+			return fmt.Errorf("set adapter powered %s after rfkill unblock: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("set adapter powered %s: %w", path, ctx.Err())
+		case <-time.After(rfkillRecoveryInterval):
+		}
+	}
 }
 
 // SetDiscoverable makes the active adapter visible to other devices (with no
@@ -139,49 +156,22 @@ func (c *Client) SetDiscoverable(ctx context.Context, on bool) error {
 	return nil
 }
 
-// tryRfkillUnblock runs rfkill unblock bluetooth and waits for Powered=true.
-func (c *Client) tryRfkillUnblock(ctx context.Context) error {
+// rfkillUnblock runs `rfkill unblock bluetooth`.
+func (c *Client) rfkillUnblock(ctx context.Context) error {
 	path, err := resolveBinary("rfkill")
 	if err != nil {
-		return fmt.Errorf("rfkill not found: %w", err)
+		return err
 	}
 	cmd := exec.CommandContext(ctx, path, "unblock", "bluetooth")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
-		text := strings.TrimSpace(stderr.String())
-		if text == "" {
-			return fmt.Errorf("rfkill unblock bluetooth: %w", runErr)
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return fmt.Errorf("rfkill unblock bluetooth: %w: %s", runErr, text)
 		}
-		return fmt.Errorf("rfkill unblock bluetooth: %w: %s", runErr, text)
+		return fmt.Errorf("rfkill unblock bluetooth: %w", runErr)
 	}
-	return c.waitForAdapterPowered(ctx)
-}
-
-// waitForAdapterPowered polls until the adapter reports powered.
-func (c *Client) waitForAdapterPowered(ctx context.Context) error {
-	deadline := time.Now().Add(rfkillRecoveryTimeout)
-	var lastErr error
-	for {
-		a, err := c.ActiveAdapterInfo(ctx)
-		if err == nil && a.Powered {
-			return nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-		if !time.Now().Before(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("wait adapter powered: %w", lastErr)
-			}
-			return fmt.Errorf("wait adapter powered: timeout after unblock")
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("wait adapter powered: %w", ctx.Err())
-		case <-time.After(rfkillRecoveryInterval):
-		}
-	}
+	return nil
 }
 
 // setAdapterProperty writes a single property on org.bluez.Adapter1 at path.

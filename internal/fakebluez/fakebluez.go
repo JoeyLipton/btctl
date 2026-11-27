@@ -3,6 +3,7 @@ package fakebluez
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +88,7 @@ type BlueZ struct {
 	agent     *AgentState
 	replies   []AgentReply
 	onStart   func(b *BlueZ)
+	blockFile string // while this file exists, powering on fails with Blocked
 }
 
 // New starts a private bus with a fake bluetoothd on it and points
@@ -205,6 +207,14 @@ func (b *BlueZ) AddDevice(d Device) dbus.ObjectPath {
 func (b *BlueZ) OnStartDiscovery(fn func(b *BlueZ)) {
 	b.mu.Lock()
 	b.onStart = fn
+	b.mu.Unlock()
+}
+
+// BlockPowerOnWhile makes Powered=true fail with org.bluez.Error.Blocked (as
+// for an rfkill soft block) for as long as file exists.
+func (b *BlueZ) BlockPowerOnWhile(file string) {
+	b.mu.Lock()
+	b.blockFile = file
 	b.mu.Unlock()
 }
 
@@ -454,7 +464,13 @@ func (h *propertiesHandler) Set(iface, name string, value dbus.Variant) *dbus.Er
 		h.b.mu.Unlock()
 		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", []any{"No such property '" + name + "'"})
 	}
+	blockFile := h.b.blockFile
 	h.b.mu.Unlock()
+	if iface == AdapterIface && name == "Powered" && value.Value() == true && blockFile != "" {
+		if _, err := os.Stat(blockFile); err == nil {
+			return bluezError("Blocked", "Blocked through rfkill")
+		}
+	}
 	h.b.SetProperty(h.path, iface, name, value.Value())
 	return nil
 }
