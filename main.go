@@ -5,16 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/bluez"
+	"github.com/joeylipton/btctl/internal/desktop"
+	"github.com/joeylipton/btctl/internal/menu"
+	"github.com/joeylipton/btctl/internal/state"
 )
 
 // Exit codes used by btctl.
 const (
-	exitSuccess = 0
-	exitError   = 1
-	exitUsage   = 2
+	exitSuccess     = 0
+	exitError       = 1
+	exitUsage       = 2
+	exitInterrupted = 130 // 128 + SIGINT, as shells report it
 )
 
 // errBadUsage signals "print the short usage banner instead of an error
@@ -22,20 +29,30 @@ const (
 // produced its own descriptive message.
 var errBadUsage = errors.New("bad usage")
 
-// macAddressRegex matches a colon-separated 48-bit MAC address.
-var macAddressRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
-
-// hciNameRegex matches a BlueZ hci adapter name (e.g. hci0).
-var hciNameRegex = regexp.MustCompile(`^hci[0-9]+$`)
+// Deadlines for the client calls main makes itself.
+const (
+	// agentUnregisterTimeout bounds the deferred UnregisterAgent call.
+	agentUnregisterTimeout = 3 * time.Second
+	// statusTimeout bounds `btctl status`, which status bars poll.
+	statusTimeout = 5 * time.Second
+)
 
 const helpText = `btctl - a minimal Bluetooth manager for Linux
 
 Usage:
-  btctl <command> [options]
+  btctl [-v] [-a <hciN>] <command> [options]
+
+Global options (accepted anywhere on the command line):
+  -v, --verbose          Log every D-Bus call to stderr
+  -a, --adapter <hciN>   Use this adapter for this run (overrides adapter select)
+  -h, --help             Show this help page
+  --version              Show the btctl version
 
 Commands:
-  list                  List all known paired/trusted devices
-  connect    <address>  Connect to a device by MAC address
+  list                  List paired devices (-v adds a trusted column)
+  connect    <address>  Connect to a device by MAC address (pairs it first
+                        if needed; the device must have been seen by a scan)
+  pair       <address>  Pair with and trust a device without connecting
   disconnect <address>  Disconnect from a device by MAC address
   trust      <address>  Mark a device as trusted (auto-reconnects after reboot)
   untrust    <address>  Remove trust from a device
@@ -55,15 +72,16 @@ Commands:
   adapter status        Show status of the active adapter
   adapter power <on|off>       Power the active adapter on or off
   adapter discoverable <on|off>  Enable or disable discoverable mode
-  adapter select <hciN>  Set the active adapter by name
+  adapter select <hciN>  Set the active adapter and remember it for later runs
+  version               Show the btctl version
   help                  Show this help page
 
 Behaviour:
   btctl automatically marks devices as trusted when connecting. Trusted devices
   reconnect without prompts. Use btctl untrust to remove trust without forgetting
   the device.
-  Adapter operations (scan, power, discoverable) use the active adapter.
-  The default active adapter is the first hci* adapter found at startup.
+  Every command uses the active adapter: the one given with -a, otherwise the
+  one saved by "btctl adapter select", otherwise the first hci* adapter.
 
 Options for scan:
   -t, --scan-time <seconds>   How long to scan (must be a positive integer)
@@ -71,6 +89,7 @@ Options for scan:
 Examples:
   btctl list
   btctl connect AA:BB:CC:DD:EE:FF
+  btctl pair AA:BB:CC:DD:EE:FF
   btctl trust AA:BB:CC:DD:EE:FF
   btctl scan -t 20
   btctl status
@@ -83,7 +102,7 @@ Trust and auto-reconnect:
     btctl untrust AA:BB:CC:DD:EE:FF
 
   To check trust status:
-    btctl list       (Trusted column visible with -v flag)
+    btctl list -v    (adds a trusted/untrusted column)
 
   Trust is a permanent setting stored by BlueZ and persists across reboots.
   Forgetting a device (btctl forget) removes both the pairing and trust.
@@ -92,11 +111,13 @@ Exit codes:
   0   Success
   1   Runtime error
   2   Usage error
+  130 Interrupted (Ctrl-C)
 
 Discoverable mode:
   When discoverable mode is enabled, your Bluetooth adapter is visible
-  to nearby devices scanning for Bluetooth hosts. This is required if
-  another device needs to initiate pairing with your machine.
+  to nearby devices scanning for Bluetooth hosts. btctl only accepts
+  pairing it starts itself (connect, pair, scan, pick), so pair from
+  btctl rather than from the other device.
 
   Discoverable mode is disabled by default and has no timeout when enabled
   via btctl (it remains on until you disable it).
@@ -111,54 +132,127 @@ Discoverable mode:
   for you.
 `
 
-const usageText = `Usage: btctl <command> [options]
+const usageText = `Usage: btctl [-v] [-a <hciN>] <command> [options]
 
 Run 'btctl help' for the full command list.
 `
 
 func main() {
-	os.Exit(runMain(os.Args[1:]))
+	// Ctrl-C or SIGTERM cancels ctx so running commands stop discovery,
+	// unregister the agent and close the picker before exiting. A second
+	// signal kills btctl at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	code := runMain(ctx, os.Args[1:])
+	stop()
+	os.Exit(code)
 }
 
 // runMain is the only function allowed to translate handler results into a
 // process exit code. It returns the exit code; the caller (main) wraps it in
 // os.Exit so we satisfy "main() is the only place os.Exit is called".
-func runMain(args []string) int {
+func runMain(ctx context.Context, args []string) int {
 	for _, a := range args {
-		if a == "-h" || a == "--help" {
+		switch a {
+		case "-h", "--help":
 			fmt.Print(helpText)
+			return exitSuccess
+		case "--version":
+			fmt.Println(versionString())
 			return exitSuccess
 		}
 	}
 
-	verbose := false
-	if len(args) > 0 && args[0] == "-v" {
-		if !(len(args) >= 2 && args[1] == "status") {
-			verbose = true
-		}
-		args = args[1:]
+	opts, args, err := parseGlobalFlags(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		fmt.Fprint(os.Stderr, usageText)
+		return exitUsage
 	}
-	bluetooth.SetVerbose(verbose)
+	desktop.SetVerbose(opts.verbose)
 
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usageText)
 		return exitUsage
 	}
 
-	if args[0] == "help" {
+	switch args[0] {
+	case "help":
 		fmt.Print(helpText)
+		return exitSuccess
+	case "version":
+		fmt.Println(versionString())
 		return exitSuccess
 	}
 
-	code, err := dispatch(args, verbose)
+	code, err := dispatch(ctx, args, opts)
 	switch {
+	case ctx.Err() != nil:
+		return exitInterrupted
 	case err == nil:
 	case errors.Is(err, errBadUsage):
 		fmt.Fprint(os.Stderr, usageText)
 	default:
-		fmt.Fprintf(os.Stderr, "error: %s\n", bluetooth.FormatUserError(err))
+		fmt.Fprintf(os.Stderr, "error: %s\n", bluez.FormatUserError(err))
+		if opts.verbose {
+			fmt.Fprintf(os.Stderr, "[v] detail: %v\n", err)
+		}
 	}
 	return code
+}
+
+// globalOptions are the flags accepted before the subcommand.
+type globalOptions struct {
+	verbose bool
+	adapter string // from -a/--adapter; "" when not given
+}
+
+// parseGlobalFlags removes the global flags (-v, -a) from args, wherever
+// they appear, and returns the rest. "--" ends flag parsing.
+func parseGlobalFlags(args []string) (globalOptions, []string, error) {
+	var opts globalOptions
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			rest = append(rest, args[i+1:]...)
+			i = len(args)
+		case a == "-v" || a == "--verbose":
+			opts.verbose = true
+		case a == "-a" || a == "--adapter":
+			if i+1 >= len(args) {
+				return opts, nil, fmt.Errorf("%s requires an adapter name (e.g. hci0)", a)
+			}
+			opts.adapter = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--adapter="):
+			opts.adapter = strings.TrimPrefix(a, "--adapter=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if opts.adapter != "" && !bluez.IsAdapterName(opts.adapter) {
+		return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
+	}
+	return opts, rest, nil
+}
+
+// clientOptions builds the bluez.Options for this run. An adapter given
+// with -a must exist; the adapter remembered by "adapter select" is only a
+// preference, because it may be an unplugged USB dongle.
+func clientOptions(opts globalOptions) bluez.Options {
+	if opts.adapter != "" {
+		return bluez.Options{Verbose: opts.verbose, Adapter: opts.adapter}
+	}
+	saved, err := state.LoadAdapter()
+	if err != nil && opts.verbose {
+		fmt.Fprintf(os.Stderr, "[v] ignoring saved adapter: %v\n", err)
+	}
+	return bluez.Options{Verbose: opts.verbose, Adapter: saved, AdapterOptional: true}
 }
 
 // parsedCommand holds validated arguments for a subcommand handler.
@@ -166,12 +260,12 @@ type parsedCommand struct {
 	name        string
 	address     string
 	scanSeconds int
-	pickCfg     bluetooth.PickerConfig
+	pickCfg     menu.Config
 	adapterArgs []string
 }
 
 // dispatch validates arguments for the chosen subcommand and invokes its handler.
-func dispatch(args []string, verbose bool) (int, error) {
+func dispatch(ctx context.Context, args []string, opts globalOptions) (int, error) {
 	cmd := args[0]
 
 	if cmd == "status" {
@@ -179,7 +273,7 @@ func dispatch(args []string, verbose bool) (int, error) {
 			fmt.Fprintln(os.Stderr, "usage: btctl status takes no arguments")
 			return exitUsage, nil
 		}
-		return runStatus(verbose)
+		return runStatus(clientOptions(opts))
 	}
 
 	if cmd == "forget" && len(args) == 1 {
@@ -193,40 +287,64 @@ func dispatch(args []string, verbose bool) (int, error) {
 		return code, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	return runWithAgent(ctx, verbose, parsed.name == "pick", func(client *bluetooth.Client, agent *bluetooth.Agent) (int, error) {
-		return executeCommand(ctx, client, agent, verbose, parsed)
-	})
-}
-
-// runWithAgent opens a client, registers the pairing agent, and runs fn.
-func runWithAgent(ctx context.Context, verbose, pickInteractive bool, fn func(*bluetooth.Client, *bluetooth.Agent) (int, error)) (int, error) {
-	client, err := bluetooth.New(ctx, verbose)
+	client, err := bluez.New(clientOptions(opts))
 	if err != nil {
 		return exitError, fmt.Errorf("init bluetooth client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	agent := bluetooth.NewAgent(client.Conn())
-	if err := client.RegisterAgent(ctx, agent); err != nil {
-		return exitError, fmt.Errorf("register agent: %w", err)
+	// Only commands that can pair register an agent: while registered, btctl
+	// is BlueZ's default agent. The menu answers pairing requests with
+	// pickers; the CLI commands use the terminal.
+	var picker *menu.Menu
+	if commandCanPair(parsed.name) {
+		var handler bluez.PairingHandler = cliPairing{Interactive: isTerminal(os.Stdin)}
+		if parsed.name == "pick" {
+			picker = menu.New(client, parsed.pickCfg)
+			handler = picker.PairingHandler()
+		}
+		unregister, err := registerAgent(ctx, client, handler)
+		if err != nil {
+			return exitError, err
+		}
+		defer unregister()
 	}
-	defer func() {
-		uctx, ucancel := context.WithTimeout(context.Background(), bluetooth.AgentUnregisterTimeout())
+
+	return executeCommand(ctx, client, picker, opts.verbose, parsed)
+}
+
+// commandCanPair reports whether a subcommand may start a pairing and
+// therefore needs a pairing agent.
+func commandCanPair(name string) bool {
+	switch name {
+	case "connect", "pair", "scan", "pick":
+		return true
+	}
+	return false
+}
+
+// isTerminal reports whether f is a character device (a terminal).
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// registerAgent registers a pairing agent backed by handler and returns a
+// function that unregisters it.
+func registerAgent(ctx context.Context, client *bluez.Client, handler bluez.PairingHandler) (func(), error) {
+	agent := bluez.NewAgent(handler)
+	if err := client.RegisterAgent(ctx, agent); err != nil {
+		return nil, fmt.Errorf("register agent: %w", err)
+	}
+	return func() {
+		uctx, ucancel := context.WithTimeout(context.Background(), agentUnregisterTimeout)
 		defer ucancel()
 		_ = client.UnregisterAgent(uctx, agent)
-	}()
-
-	if !pickInteractive {
-		go agent.AutoConfirm(ctx)
-	}
-	return fn(client, agent)
+	}, nil
 }
 
 // executeCommand dispatches to the handler for a validated parsedCommand.
-func executeCommand(ctx context.Context, client *bluetooth.Client, agent *bluetooth.Agent, verbose bool, parsed parsedCommand) (int, error) {
+func executeCommand(ctx context.Context, client *bluez.Client, picker *menu.Menu, verbose bool, parsed parsedCommand) (int, error) {
 	switch parsed.name {
 	case "list":
 		return runList(ctx, client, verbose)
@@ -234,6 +352,8 @@ func executeCommand(ctx context.Context, client *bluetooth.Client, agent *blueto
 		return runScan(ctx, client, parsed.scanSeconds)
 	case "connect":
 		return runConnect(ctx, client, parsed.address)
+	case "pair":
+		return runPair(ctx, client, parsed.address)
 	case "disconnect":
 		return runDisconnect(ctx, client, parsed.address)
 	case "forget":
@@ -245,7 +365,7 @@ func executeCommand(ctx context.Context, client *bluetooth.Client, agent *blueto
 	case "adapter":
 		return runAdapter(ctx, client, parsed.adapterArgs)
 	case "pick":
-		return runPick(ctx, client, parsed.pickCfg, agent)
+		return runPick(ctx, picker)
 	default:
 		return exitUsage, errBadUsage
 	}

@@ -1,0 +1,12 @@
+# Build output
+/btctl
+/dist/
+*.test
+*.out
+coverage.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store

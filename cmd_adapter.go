@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/bluez"
+	"github.com/joeylipton/btctl/internal/state"
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
-func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (int, error) {
+func runAdapter(ctx context.Context, client *bluez.Client, args []string) (int, error) {
 	sub := args[0]
 	switch sub {
 	case "list":
@@ -27,7 +29,7 @@ func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (i
 	}
 }
 
-func runAdapterList(ctx context.Context, client *bluetooth.Client) (int, error) {
+func runAdapterList(ctx context.Context, client *bluez.Client) (int, error) {
 	adapters, err := client.ListAdapters(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter list: %w", err)
@@ -51,7 +53,7 @@ func runAdapterList(ctx context.Context, client *bluetooth.Client) (int, error) 
 	return exitSuccess, nil
 }
 
-func runAdapterStatus(ctx context.Context, client *bluetooth.Client) (int, error) {
+func runAdapterStatus(ctx context.Context, client *bluez.Client) (int, error) {
 	a, err := client.ActiveAdapterInfo(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter status: %w", err)
@@ -59,18 +61,14 @@ func runAdapterStatus(ctx context.Context, client *bluetooth.Client) (int, error
 	fmt.Printf("Name           %s\n", a.Name)
 	fmt.Printf("Address        %s\n", a.Address)
 	fmt.Printf("Alias          %s\n", a.Alias)
-	fmt.Printf("Powered        %s\n", yesNo(a.Powered))
-	fmt.Printf("Discovering    %s\n", yesNo(a.Discovering))
-	fmt.Printf("Discoverable   %s\n", yesNo(a.Discoverable))
+	fmt.Printf("Powered        %s\n", textfmt.YesNo(a.Powered))
+	fmt.Printf("Discovering    %s\n", textfmt.YesNo(a.Discovering))
+	fmt.Printf("Discoverable   %s\n", textfmt.YesNo(a.Discoverable))
 	return exitSuccess, nil
 }
 
-func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
-	path := client.ActiveAdapter()
-	if path == "" {
-		return exitError, fmt.Errorf("adapter power: no active adapter")
-	}
-	if err := client.SetAdapterPowered(ctx, path, on); err != nil {
+func runAdapterPower(ctx context.Context, client *bluez.Client, on bool) (int, error) {
+	if err := client.SetAdapterPowered(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter power: %w", err)
 	}
 	if on {
@@ -81,12 +79,8 @@ func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (in
 	return exitSuccess, nil
 }
 
-func runAdapterDiscoverable(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
-	path := client.ActiveAdapter()
-	if path == "" {
-		return exitError, fmt.Errorf("adapter discoverable: no active adapter")
-	}
-	if err := client.SetDiscoverable(ctx, path, on); err != nil {
+func runAdapterDiscoverable(ctx context.Context, client *bluez.Client, on bool) (int, error) {
+	if err := client.SetDiscoverable(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter discoverable: %w", err)
 	}
 	if on {
@@ -97,24 +91,20 @@ func runAdapterDiscoverable(ctx context.Context, client *bluetooth.Client, on bo
 	return exitSuccess, nil
 }
 
-func runAdapterSelect(ctx context.Context, client *bluetooth.Client, name string) (int, error) {
+func runAdapterSelect(ctx context.Context, client *bluez.Client, name string) (int, error) {
 	adapters, err := client.ListAdapters(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter select: %w", err)
 	}
 	for _, a := range adapters {
 		if a.Name == name {
-			client.SetActiveAdapter(a.Path)
+			client.SelectAdapter(a)
+			if err := state.SaveAdapter(a.Name); err != nil {
+				return exitError, fmt.Errorf("adapter select: %w", err)
+			}
 			fmt.Printf("active adapter set to %s (%s)\n", a.Name, a.Address)
 			return exitSuccess, nil
 		}
 	}
-	return exitError, fmt.Errorf("adapter select %s: %w", name, bluetooth.ErrAdapterNotReady)
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
+	return exitError, fmt.Errorf("adapter select: %w: %s", bluez.ErrAdapterNotFound, name)
 }

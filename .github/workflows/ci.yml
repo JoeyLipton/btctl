@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2026.2.2"
+          install-go: false
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Go version go.mod allows, and the newest release.
+        go: ["1.22", stable]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Install dbus-daemon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus
+      - name: go test
+        env:
+          # Fail instead of skipping the tests that need dbus-daemon.
+          BTCTL_REQUIRE_DBUS: "1"
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: |
+          {
+            echo "### Coverage (Go ${{ matrix.go }})"
+            echo '```'
+            go tool cover -func=coverage.out | tail -n 1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build release archives
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Build all platforms
+        run: scripts/build-release.sh "$(git describe --tags --always)"
+      - name: Smoke-test the amd64 binary
+        run: |
+          archive="$(ls dist/btctl_*_linux_amd64.tar.gz)"
+          tar -xzf "$archive" -C dist
+          bin="${archive%.tar.gz}/btctl"
+          "$bin" --version
+          "$bin" help >/dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: btctl-dist
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
