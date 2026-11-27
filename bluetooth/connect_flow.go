@@ -239,7 +239,7 @@ func (m *Menu) handleConnectEvent(
 	_ = ctx
 	switch ev.kind {
 	case connectEventDBusDone:
-		if ev.err != nil && !isDBusError(ev.err, alreadyConnectedErr) {
+		if ev.err != nil && !isDBusError(ev.err, errNameAlreadyConnected) {
 			menuStderr("error: %s", ev.err)
 			notify(notifyAppName, "Could not connect to "+name+": "+FormatUserError(ev.err))
 			return true, nil

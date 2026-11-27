@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -97,19 +96,12 @@ func (c *Client) pairDBusCall(ctx context.Context, path dbus.ObjectPath) error {
 	obj := c.conn.Object(bluezService, path)
 	call := obj.CallWithContext(pairCtx, bluezDeviceIface+".Pair", 0)
 	if call.Err != nil {
-		if pairAlreadyPaired(call.Err) || isDBusError(call.Err, errNameAlreadyExists) {
+		if isDBusError(call.Err, errNameAlreadyExists) {
 			return nil
 		}
 		return fmt.Errorf("pair device %s: %w", path, call.Err)
 	}
 	return nil
-}
-
-// pairAlreadyPaired reports whether a Pair error indicates the device is
-// already paired, which is treated as success.
-func pairAlreadyPaired(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "already exists") || strings.Contains(msg, "already paired")
 }
 
 // Connect sets Trusted, invokes Device1.Connect, then waits until the
@@ -171,30 +163,23 @@ func (c *Client) connectInteractive(ctx context.Context, path dbus.ObjectPath) e
 	return nil
 }
 
-// isAlreadyDisconnectedError reports whether a Disconnect D-Bus error means
-// the device is already disconnected, which is treated as success.
-func isAlreadyDisconnectedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "NotConnected") ||
-		strings.Contains(msg, "not connected")
-}
-
 // Disconnect asks BlueZ to disconnect from the device at path. Property watch
 // for Connected: false is subscribed before the Disconnect() D-Bus call.
 func (c *Client) Disconnect(ctx context.Context, path dbus.ObjectPath) error {
 	name := c.getDeviceName(ctx, path)
 
-	disconnectCtx, cancel := context.WithTimeout(context.Background(), disconnectTimeout)
+	// The watch is bounded by the caller's context too, and is always joined
+	// before returning so no goroutine outlives the call.
+	disconnectCtx, cancel := context.WithTimeout(ctx, disconnectTimeout)
 	defer cancel()
 	watchDone := make(chan error, 1)
 	go func() {
 		watchDone <- c.watchProperty(disconnectCtx, path, bluezDeviceIface, propConnected, boolPropertyWant(false))
 	}()
 	if err := c.callCtx(ctx, path, bluezDeviceIface, "Disconnect"); err != nil {
-		if isAlreadyDisconnectedError(err) {
+		cancel()
+		<-watchDone
+		if isDBusError(err, errNameNotConnected) {
 			return nil
 		}
 		return fmt.Errorf("disconnect device %s: %w", path, err)

@@ -157,6 +157,9 @@ func runMain(args []string) int {
 		fmt.Fprint(os.Stderr, usageText)
 	default:
 		fmt.Fprintf(os.Stderr, "error: %s\n", bluetooth.FormatUserError(err))
+		if verbose {
+			fmt.Fprintf(os.Stderr, "[v] detail: %v\n", err)
+		}
 	}
 	return code
 }

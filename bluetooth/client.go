@@ -6,7 +6,6 @@ package bluetooth
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -80,7 +79,7 @@ func (c *Client) Verbose() bool {
 
 // Conn returns the underlying D-Bus connection. It exists so callers (e.g.
 // main.go) can construct an Agent bound to the same bus connection the
-// Client is using. Returns nil after Close has run.
+// Client is using.
 func (c *Client) Conn() *dbus.Conn {
 	if c == nil {
 		return nil
@@ -88,17 +87,9 @@ func (c *Client) Conn() *dbus.Conn {
 	return c.conn
 }
 
-// isDBusError reports whether err (or any error it wraps) is a dbus.Error
-// whose Name field matches name.
-func isDBusError(err error, name string) bool {
-	var dberr dbus.Error
-	if errors.As(err, &dberr) {
-		return dberr.Name == name
-	}
-	return false
-}
-
-// Close releases the underlying D-Bus connection.
+// Close releases the underlying D-Bus connection. It is safe to call more
+// than once. c.conn is deliberately not reset: goroutines that are still
+// winding down may read it, and calls on a closed connection fail cleanly.
 func (c *Client) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
@@ -106,7 +97,6 @@ func (c *Client) Close() error {
 	if err := c.conn.Close(); err != nil {
 		return fmt.Errorf("close D-Bus connection: %w", err)
 	}
-	c.conn = nil
 	return nil
 }
 

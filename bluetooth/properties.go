@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -215,17 +214,10 @@ func propertyWasInvalidated(sig *dbus.Signal, property string) bool {
 	return false
 }
 
-// propertyAbsent reports whether err indicates the D-Bus property does not exist.
+// propertyAbsent reports whether err indicates the D-Bus property does not
+// exist. BlueZ answers Properties.Get for a missing property with InvalidArgs.
 func propertyAbsent(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "invalidargs") ||
-		strings.Contains(msg, "invalid args") ||
-		strings.Contains(msg, "unknownproperty") ||
-		strings.Contains(msg, "unknown property") ||
-		strings.Contains(msg, "no such property")
+	return isDBusError(err, errNameInvalidArgs, errNameUnknownProperty)
 }
 
 // waitForConnectionComplete waits until the BLE connection is fully established.

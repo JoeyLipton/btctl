@@ -132,26 +132,10 @@ func runConnect(ctx context.Context, client *bluetooth.Client, address string) (
 			fmt.Fprintf(os.Stderr, "[btctl] already connecting to %s\n", address)
 			return exitSuccess, nil
 		}
-		if connectTimedOut(err) {
-			fmt.Fprintf(os.Stderr, "[btctl] error: connect timed out\n")
-		}
 		return exitError, err
 	}
 	fmt.Fprintf(os.Stderr, "[btctl] connected to %s (%s)\n", name, address)
 	return exitSuccess, nil
-}
-
-func connectTimedOut(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "deadline exceeded") ||
-		strings.Contains(msg, "context deadline") ||
-		strings.Contains(msg, "timed out")
 }
 
 func connectDisplayName(ctx context.Context, client *bluetooth.Client, path dbus.ObjectPath, address string) string {

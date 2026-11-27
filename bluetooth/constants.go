@@ -140,22 +140,6 @@ const (
 // Battery sentinel when org.bluez.Battery1 is absent.
 const batteryUnavailable = -1
 
-// BlueZ D-Bus error names checked by the agent and client.
-const (
-	errNameRejected       = "org.bluez.Error.Rejected"
-	errNameCanceled       = "org.bluez.Error.Canceled"
-	errNameNotReady       = "org.bluez.Error.NotReady"
-	errNameFailed         = "org.bluez.Error.Failed"
-	errNameAlreadyExists  = "org.bluez.Error.AlreadyExists"
-	errNameNotSupported   = "org.bluez.Error.NotSupported"
-	errNameAuthFailed     = "org.bluez.Error.AuthenticationFailed"
-	errNameAuthCanceled   = "org.bluez.Error.AuthenticationCanceled"
-	errNameInProgress     = "org.bluez.Error.InProgress"
-	errNameServiceUnknown = "org.freedesktop.DBus.Error.ServiceUnknown"
-	errNameNoReply        = "org.freedesktop.DBus.Error.NoReply"
-	alreadyConnectedErr   = "org.bluez.Error.AlreadyConnected"
-)
-
 // MinScanDuration returns the minimum allowed scan window.
 func MinScanDuration() time.Duration { return minScanDuration }
 

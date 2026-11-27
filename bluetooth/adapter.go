@@ -192,12 +192,15 @@ func (c *Client) setAdapterProperty(ctx context.Context, path dbus.ObjectPath, p
 }
 
 // adapterPoweredNeedsRecovery reports whether a Powered-set failure may be
-// recoverable via rfkill unblock.
+// recoverable via rfkill unblock. Newer BlueZ reports an rfkill block as
+// org.bluez.Error.Blocked; older releases use Failed with the reason
+// "Blocked through rfkill".
 func adapterPoweredNeedsRecovery(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "blocked") ||
-		strings.Contains(msg, "not ready") ||
-		strings.Contains(msg, "not available")
+	if isDBusError(err, errNameBlocked, errNameNotReady, errNameNotAvailable) {
+		return true
+	}
+	return isDBusError(err, errNameFailed) &&
+		strings.Contains(strings.ToLower(dbusErrorMessage(err)), "rfkill")
 }
 
 // parseAdapter extracts an Adapter from a property map.
