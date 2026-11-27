@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/joeylipton/btctl/internal/state"
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
 // adapterMenuEntries are the fixed options in the adapter settings sub-menu.
@@ -155,9 +156,7 @@ func (m *Menu) menuAdapterSetDiscoverable(ctx context.Context, on bool) {
 // the adapter equivalent.
 func buildAdapterLine(a Adapter, active bool) string {
 	name := a.Name
-	if len(name) > adapterNameWidth {
-		name = name[:adapterNameWidth]
-	}
+	name = textfmt.Truncate(name, adapterNameWidth)
 	status := "[off    ]"
 	if a.Powered {
 		status = "[powered]"

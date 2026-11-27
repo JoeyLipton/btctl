@@ -12,9 +12,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/joeylipton/btctl/bluetooth"
-
 	"github.com/godbus/dbus/v5"
+
+	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
 func runList(ctx context.Context, client *bluetooth.Client, verbose bool) (int, error) {
@@ -227,10 +228,7 @@ func runPick(menu *bluetooth.Menu) (int, error) {
 func selectScanDevice(ctx context.Context, client *bluetooth.Client, devices []bluetooth.Device) (int, error) {
 	fmt.Println("New devices found:")
 	for i, d := range devices {
-		name := displayName(d)
-		if len(name) > scanNameWidth {
-			name = name[:scanNameWidth]
-		}
+		name := textfmt.Truncate(displayName(d), scanNameWidth)
 		fmt.Printf("  %d) %-*s %s\n", i+1, scanNameWidth, name, d.Address)
 	}
 	fmt.Print("Enter number to connect (or press Enter to skip): ")

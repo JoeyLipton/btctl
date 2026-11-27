@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
 // scanProgress displays scan progress outside the picker process. Implementations
@@ -170,9 +172,7 @@ func (s *stderrProgress) DeviceFound(name, address string) {
 	if s.w == nil {
 		s.w = os.Stderr
 	}
-	if len(name) > deviceNameWidth {
-		name = name[:deviceNameWidth]
-	}
+	name = textfmt.Truncate(name, deviceNameWidth)
 	fmt.Fprintf(s.w, "%sfound:   %-*s %s\n", stderrPrefix, deviceNameWidth, name, address)
 }
 

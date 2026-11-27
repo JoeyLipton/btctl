@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
 // deviceAddressPattern matches a MAC address embedded in a picker line.
@@ -355,9 +357,7 @@ func buildDeviceLine(d Device, index int, showIndex bool) string {
 		status = "paired"
 	}
 	name := devicePresentName(d)
-	if len(name) > deviceNameWidth {
-		name = name[:deviceNameWidth]
-	}
+	name = textfmt.Truncate(name, deviceNameWidth)
 	var line string
 	if showIndex {
 		line = fmt.Sprintf("%*d) %-*s %s", scanIndexWidth, index, deviceNameWidth, name, d.Address)
