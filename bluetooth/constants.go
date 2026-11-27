@@ -24,7 +24,9 @@ const (
 	// its own connection timeouts, so this is a generous safety net.
 	connectCallTimeout = 45 * time.Second
 
-	connectedPollInterval = 100 * time.Millisecond
+	// watchPollInterval is the safety-net poll in watchProperty, which is
+	// otherwise driven by PropertiesChanged signals.
+	watchPollInterval = time.Second
 
 	// disconnectTimeout is how long to wait for Connected: false after
 	// the BlueZ Disconnect() call returns. BLE devices take 2-8 seconds

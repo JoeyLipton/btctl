@@ -85,12 +85,18 @@ func (c *Client) PairDevice(ctx context.Context, path dbus.ObjectPath) error {
 
 	c.trustWithWarning(ctx, path, string(path))
 
+	// The watcher is cancelled and joined on every path so it never keeps
+	// polling after PairDevice returns.
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	pairedDone := make(chan error, 1)
 	go func() {
-		pairedDone <- c.waitForPaired(ctx, path)
+		pairedDone <- c.waitForPaired(watchCtx, path)
 	}()
 
 	if err := c.pairDBusCall(ctx, path); err != nil {
+		cancel()
+		<-pairedDone
 		return err
 	}
 

@@ -1,10 +1,9 @@
 // Package bluetooth - properties.go reads and waits on org.bluez.Device1
-// properties. watchProperty subscribes to PropertiesChanged AND polls
-// concurrently (whichever observes the wanted value first wins) because a
-// signal can arrive before the subscription is fully active. The Connect
-// completion logic lives here: a new (unbonded) device is only "connected" once
-// Connected, Bonded, and Paired are all true, so btctl stays alive through the
-// LE bonding handshake instead of exiting at Connected and being dropped.
+// properties. watchProperty is driven by PropertiesChanged signals (see its
+// comment for why no change can be missed). The Connect completion logic lives
+// here: a new (unbonded) device is only "connected" once Connected, Bonded,
+// and Paired are all true, so btctl stays alive through the LE bonding
+// handshake instead of exiting at Connected and being dropped.
 package bluetooth
 
 import (
@@ -44,36 +43,6 @@ func (c *Client) getProperty(ctx context.Context, path dbus.ObjectPath, iface, p
 	return variant, nil
 }
 
-// pollProperty polls a property until wantFn returns true or ctx expires.
-func (c *Client) pollProperty(
-	ctx context.Context,
-	path dbus.ObjectPath,
-	iface string,
-	property string,
-	wantFn func(dbus.Variant) bool,
-) error {
-	ticker := time.NewTicker(connectedPollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("poll %s on %s: %w", property, path, ctx.Err())
-		case <-ticker.C:
-			v, err := c.getProperty(ctx, path, iface, property)
-			if err != nil {
-				if c.verbose {
-					fmt.Fprintf(os.Stderr, "%spoll %s on %s: %v (retrying)\n",
-						stderrPrefix, property, path, err)
-				}
-				continue
-			}
-			if wantFn(v) {
-				return nil
-			}
-		}
-	}
-}
-
 // propertiesChangedMatchRule returns AddMatchSignal options for PropertiesChanged
 // on a single object path.
 func propertiesChangedMatchRule(path dbus.ObjectPath) []dbus.MatchOption {
@@ -85,58 +54,58 @@ func propertiesChangedMatchRule(path dbus.ObjectPath) []dbus.MatchOption {
 	}
 }
 
-// parsePropertiesChanged inspects a PropertiesChanged signal for path/iface/
-// property. Returns wantMet=true when wantFn matches the new value.
-func parsePropertiesChanged(
+// propertyChange classifies a signal for one property of one object.
+type propertyChange int
+
+const (
+	propertyUnrelated   propertyChange = iota // another object, interface or property
+	propertyWanted                            // the new value satisfies wantFn
+	propertyOther                             // a new value that does not satisfy wantFn
+	propertyInvalidated                       // changed without a value; re-read it
+)
+
+// classifyPropertyChange inspects a PropertiesChanged signal for
+// path/iface/property.
+func classifyPropertyChange(
 	sig *dbus.Signal,
 	path dbus.ObjectPath,
 	iface string,
 	property string,
 	wantFn func(dbus.Variant) bool,
-) (wantMet bool) {
-	if sig == nil || sig.Path != path {
-		return false
+) propertyChange {
+	if sig == nil || sig.Path != path || sig.Name != signalPropertiesChanged || len(sig.Body) < 2 {
+		return propertyUnrelated
 	}
-	if len(sig.Body) < 2 {
-		return false
+	if changedIface, ok := sig.Body[0].(string); !ok || changedIface != iface {
+		return propertyUnrelated
 	}
-	changedIface, ok := sig.Body[0].(string)
-	if !ok || changedIface != iface {
-		return false
+	if changed, ok := sig.Body[1].(map[string]dbus.Variant); ok {
+		if v, ok := changed[property]; ok {
+			if wantFn(v) {
+				return propertyWanted
+			}
+			return propertyOther
+		}
 	}
-	changed, ok := sig.Body[1].(map[string]dbus.Variant)
-	if !ok {
-		return false
+	if len(sig.Body) >= 3 {
+		if invalidated, ok := sig.Body[2].([]string); ok {
+			for _, name := range invalidated {
+				if name == property {
+					return propertyInvalidated
+				}
+			}
+		}
 	}
-	if v, ok := changed[property]; ok && wantFn(v) {
-		return true
-	}
-	if propertyWasInvalidated(sig, property) {
-		return false
-	}
-	return false
+	return propertyUnrelated
 }
 
-// startPollGoroutine runs pollProperty in a goroutine and sends the result on pollDone.
-func startPollGoroutine(
-	ctx context.Context,
-	c *Client,
-	path dbus.ObjectPath,
-	iface string,
-	property string,
-	wantFn func(dbus.Variant) bool,
-	pollDone chan<- error,
-	wg *sync.WaitGroup,
-) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		pollDone <- c.pollProperty(ctx, path, iface, property, wantFn)
-	}()
-}
-
-// watchProperty waits for a property change using concurrent signal delivery
-// and active polling. Whichever succeeds first wins.
+// watchProperty waits until wantFn accepts the value of property.
+//
+// It subscribes to PropertiesChanged first and then reads the current value
+// once, so a change that happens between the two cannot be missed, and then
+// waits for signals. AddMatch is synchronous, so the subscription is active
+// before the read. A slow poll remains as a safety net in case a signal is
+// dropped. Everything runs in the calling goroutine.
 func (c *Client) watchProperty(
 	ctx context.Context,
 	path dbus.ObjectPath,
@@ -148,9 +117,6 @@ func (c *Client) watchProperty(
 		return fmt.Errorf("watch %s on %s: bluetooth client is not connected", property, path)
 	}
 
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	match := propertiesChangedMatchRule(path)
 	if err := c.conn.AddMatchSignal(match...); err != nil {
 		return fmt.Errorf("watch %s on %s: subscribe PropertiesChanged: %w", property, path, err)
@@ -161,57 +127,41 @@ func (c *Client) watchProperty(
 	c.conn.Signal(sigCh)
 	defer c.conn.RemoveSignal(sigCh)
 
-	pollDone := make(chan error, 1)
-	var wg sync.WaitGroup
+	check := func() bool {
+		v, err := c.getProperty(ctx, path, iface, property)
+		if err != nil {
+			if c.verbose && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "%sread %s on %s: %v (retrying)\n", stderrPrefix, property, path, err)
+			}
+			return false
+		}
+		return wantFn(v)
+	}
+	if check() {
+		return nil
+	}
 
-	startPollGoroutine(watchCtx, c, path, iface, property, wantFn, pollDone, &wg)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-watchCtx.Done():
-				return
-			case sig := <-sigCh:
-				if parsePropertiesChanged(sig, path, iface, property, wantFn) {
-					select {
-					case pollDone <- nil:
-					default:
-					}
-					return
+	ticker := time.NewTicker(watchPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("watch %s on %s: %w", property, path, ctx.Err())
+		case sig := <-sigCh:
+			switch classifyPropertyChange(sig, path, iface, property, wantFn) {
+			case propertyWanted:
+				return nil
+			case propertyInvalidated:
+				if check() {
+					return nil
 				}
 			}
-		}
-	}()
-
-	var err error
-	select {
-	case err = <-pollDone:
-	case <-watchCtx.Done():
-		err = fmt.Errorf("watch %s on %s: %w", property, path, watchCtx.Err())
-	}
-	cancel()
-	wg.Wait()
-	return err
-}
-
-// propertyWasInvalidated reports whether property appears in Body[2] without
-// a new value, meaning the concurrent poll path should read it.
-func propertyWasInvalidated(sig *dbus.Signal, property string) bool {
-	if len(sig.Body) < 3 {
-		return false
-	}
-	invalidated, ok := sig.Body[2].([]string)
-	if !ok {
-		return false
-	}
-	for _, inv := range invalidated {
-		if inv == property {
-			return true
+		case <-ticker.C:
+			if check() {
+				return nil
+			}
 		}
 	}
-	return false
 }
 
 // propertyAbsent reports whether err indicates the D-Bus property does not

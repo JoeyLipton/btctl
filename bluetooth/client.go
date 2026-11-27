@@ -234,7 +234,8 @@ func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
 	if adapterPath == "" {
 		return []Device{}, nil
 	}
-	adapterPrefix := string(adapterPath)
+	// The trailing slash keeps hci1 from matching /org/bluez/hci10/....
+	adapterPrefix := string(adapterPath) + "/"
 
 	devices := make([]Device, 0)
 	for path, ifaces := range objects {
