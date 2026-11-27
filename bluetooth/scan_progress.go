@@ -47,15 +47,16 @@ func newScanProgress(verbose bool) scanProgress {
 	if !notificationDaemonAvailable() {
 		return stderr
 	}
-	// resolveBinary (not exec.LookPath) so stripped i3/polybar PATHs still find
-	// the helpers; the resolved absolute path is stored and passed to exec so
-	// the launch itself does not depend on PATH either.
-	if path, err := resolveBinary(notifySendExecutable); err == nil {
+	// notify-send comes from the shared notifier (which resolves it despite
+	// stripped i3/polybar PATHs and caches its environment); zenity goes
+	// through resolveBinary for the same reason.
+	if r := resolveNotifyState(); r.available {
 		return &notifySendProgress{
 			verbose:    verbose,
 			usePrintID: notifySendSupportsPrintID(),
 			stderr:     stderr,
-			path:       path,
+			path:       r.path,
+			env:        r.env,
 		}
 	}
 	if path, err := resolveBinary(zenityExecutable); err == nil {
@@ -72,7 +73,8 @@ type notifySendProgress struct {
 	foundCount int
 	degraded   bool
 	stderr     *stderrProgress
-	path       string // resolved absolute path to notify-send
+	path       string   // resolved absolute path to notify-send
+	env        []string // environment for notify-send (see notifyEnv)
 }
 
 func (n *notifySendProgress) degrade(err error) {
@@ -134,7 +136,7 @@ func (n *notifySendProgress) send(body string, timeoutMs int, captureID bool) er
 		args = append([]string{"--print-id"}, args...)
 	}
 	cmd := exec.Command(n.path, args...)
-	cmd.Env = notifyEnv()
+	cmd.Env = n.env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("notify-send: %w: %s", err, strings.TrimSpace(string(out)))

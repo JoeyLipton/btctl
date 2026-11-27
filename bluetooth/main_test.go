@@ -9,7 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	// Never pop up real desktop notifications from tests.
-	notifyState.once.Do(func() {})
+	notifyState = disabledNotifier()
 	os.Exit(m.Run())
 }
 

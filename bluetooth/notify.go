@@ -1,9 +1,9 @@
 // Package bluetooth - notify.go is the single entry point for desktop
-// notifications via notify-send. Every notify-send invocation in the package
-// resolves availability through here exactly once (sync.Once), and all sends
-// are fire-and-forget: they run in a goroutine and never block or fail the
-// caller's control flow. notify-send absence is silent; runtime failures are
-// logged only under -v.
+// notifications via notify-send. notify-send's location and environment are
+// resolved once (sync.Once). Sends never fail the caller: notify-send is
+// started before notify returns (so a CLI that exits right away still
+// delivers it) and reaped in the background. notify-send absence is silent;
+// runtime failures are logged only under -v.
 package bluetooth
 
 import (
@@ -26,12 +26,23 @@ const (
 	notifyDurationAlert = 8000
 )
 
-// notifyState caches notify-send availability. It is resolved once via
-// resolveNotifyState and then read without locking.
-var notifyState struct {
+// notifyResolver caches notify-send's location and environment. It is
+// resolved once on first use and then read without locking.
+type notifyResolver struct {
 	once      sync.Once
 	available bool
 	path      string
+	env       []string
+}
+
+// notifyState is the process-wide notifier. Tests replace it.
+var notifyState = &notifyResolver{}
+
+// disabledNotifier returns a resolver that never sends anything.
+func disabledNotifier() *notifyResolver {
+	r := &notifyResolver{}
+	r.once.Do(func() {})
+	return r
 }
 
 // notifyVerbose controls whether notify-send failures are logged to stderr.
@@ -44,19 +55,22 @@ func SetVerbose(v bool) { notifyVerbose = v }
 // resolveNotifyState performs the one-time notify-send PATH lookup. It must be
 // the only place that resolves availability so the sync.Once is never consumed
 // by a no-op (which would permanently disable notifications).
-func resolveNotifyState() {
-	notifyState.once.Do(func() {
+func resolveNotifyState() *notifyResolver {
+	r := notifyState
+	r.once.Do(func() {
 		// resolveBinary falls back to absolute prefixes when PATH is stripped
 		// (i3/polybar launches). notify-send absence is not an error.
 		if p, err := resolveBinary(notifySendExecutable); err == nil {
-			notifyState.available = true
-			notifyState.path = p
+			r.available = true
+			r.path = p
+			r.env = notifyEnv()
 		}
 	})
+	return r
 }
 
-// notify sends a desktop status notification asynchronously. It is a no-op when
-// notify-send is not installed.
+// notify sends a desktop status notification without waiting for it to be
+// shown. It is a no-op when notify-send is not installed.
 func notify(title, body string) {
 	notifyWithDuration(title, body, notifyDurationStatus)
 }
@@ -67,8 +81,8 @@ func notifyAlert(title, body string) {
 }
 
 func notifyWithDuration(title, body string, durationMs int) {
-	resolveNotifyState()
-	if !notifyState.available {
+	r := resolveNotifyState()
+	if !r.available {
 		return
 	}
 	// Flags precede the summary/body positionals; some notify-send builds are
@@ -80,12 +94,21 @@ func notifyWithDuration(title, body string, durationMs int) {
 		title,
 		body,
 	}
+	cmd := exec.Command(r.path, args...)
+	// notify-send reaches the notification daemon over the session bus;
+	// an i3 keybind launch may lack DBUS_SESSION_BUS_ADDRESS, so supply it.
+	cmd.Env = r.env
+	// Start synchronously: the CLI often exits right after notifying, and a
+	// started notify-send finishes on its own after btctl is gone. Only the
+	// wait (reaping the child) happens in the background.
+	if err := cmd.Start(); err != nil {
+		if notifyVerbose {
+			fmt.Fprintf(os.Stderr, "%snotify-send failed: %v\n", stderrPrefix, err)
+		}
+		return
+	}
 	go func() {
-		cmd := exec.Command(notifyState.path, args...)
-		// notify-send reaches the notification daemon over the session bus;
-		// an i3 keybind launch may lack DBUS_SESSION_BUS_ADDRESS, so supply it.
-		cmd.Env = notifyEnv()
-		if err := cmd.Run(); err != nil && notifyVerbose {
+		if err := cmd.Wait(); err != nil && notifyVerbose {
 			fmt.Fprintf(os.Stderr, "%snotify-send failed: %v\n", stderrPrefix, err)
 		}
 	}()
@@ -155,10 +178,10 @@ func resolveDBusAddressFromSocket() string {
 // than stacking. --help goes to stderr on some distros (libnotify/Ubuntu) and
 // stdout on others, so both streams are captured.
 func notifySendSupportsPrintID() bool {
-	resolveNotifyState()
-	if !notifyState.available {
+	r := resolveNotifyState()
+	if !r.available {
 		return false
 	}
-	out, _ := exec.Command(notifyState.path, "--help").CombinedOutput()
+	out, _ := exec.Command(r.path, "--help").CombinedOutput()
 	return bytes.Contains(out, []byte("--print-id"))
 }
