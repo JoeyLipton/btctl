@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in btctl does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: |
+        The command you ran and its output. Running it again with `-v` adds the
+        D-Bus calls btctl made, which usually shows where it went wrong.
+        MAC addresses can be shortened if you prefer.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: btctl version
+      description: Output of `btctl --version`.
+    validations:
+      required: true
+  - type: input
+    id: bluez
+    attributes:
+      label: BlueZ version and distribution
+      description: For example "BlueZ 5.79, Arch Linux" (`bluetoothctl --version`).
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: The Bluetooth device involved, if any (model, keyboard/headphones/...).

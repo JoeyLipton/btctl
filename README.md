@@ -259,9 +259,8 @@ Code layout:
 | `internal/state` | The remembered adapter. |
 | `internal/fakebluez` | The fake `bluetoothd` used by the tests. |
 
-Releases are cut by pushing a `vX.Y.Z` tag after adding its section to
-[CHANGELOG.md](CHANGELOG.md); the release workflow tests, builds and
-publishes the binaries.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for pull requests and the release
+process, and [SECURITY.md](SECURITY.md) for reporting security problems.
 
 ## License
 
