@@ -16,7 +16,7 @@ import (
 func (m *Menu) connectWithConfirmation(parentCtx context.Context, device Device) error {
 	mu := m.client.connLock(device.Path)
 	if !mu.TryLock() {
-		menuStderr("already connecting to %s", devicePresentName(device))
+		tell("Already connecting to %s", devicePresentName(device))
 		return nil
 	}
 	defer mu.Unlock()
@@ -103,7 +103,7 @@ func (m *Menu) confirmPairingPrompt(ctx context.Context, name string, req Pairin
 	choice, err := m.promptContext(ctx, "Pairing request - "+name, lines)
 	if err != nil {
 		if ctx.Err() == nil {
-			menuStderr("confirm prompt failed: %s", err)
+			tell("Could not show the pairing prompt: %s", err)
 		}
 		return false
 	}

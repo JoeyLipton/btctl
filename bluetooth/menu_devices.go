@@ -29,7 +29,7 @@ func (m *Menu) menuConnect() error {
 		}
 	}
 	if len(disconnected) == 0 {
-		menuStderr("no disconnected devices")
+		tell("No disconnected devices to connect")
 		return nil
 	}
 
@@ -66,7 +66,7 @@ func (m *Menu) menuDisconnect() error {
 		}
 	}
 	if len(connected) == 0 {
-		menuStderr("no connected devices")
+		tell("No connected devices")
 		return nil
 	}
 
@@ -83,7 +83,7 @@ func (m *Menu) menuDisconnect() error {
 	}
 
 	if err := m.client.Disconnect(ctx, selected.Path); err != nil {
-		menuStderr("error: %s", err)
+		tell("Could not disconnect %s: %s", devicePresentName(*selected), FormatUserError(err))
 		return nil
 	}
 	menuStderr("disconnected from %s", devicePresentName(*selected))
@@ -101,7 +101,7 @@ func (m *Menu) menuForget() error {
 		return fmt.Errorf("menu forget: list devices: %w", err)
 	}
 	if len(devices) == 0 {
-		menuStderr("no known devices")
+		tell("No paired devices")
 		return nil
 	}
 
@@ -131,7 +131,7 @@ func (m *Menu) menuForget() error {
 	}
 
 	if err := m.client.ForgetDevice(ctx, selected.Path); err != nil {
-		menuStderr("error: %s", err)
+		tell("Could not forget %s: %s", devicePresentName(*selected), FormatUserError(err))
 		return nil
 	}
 	menuStderr("forgot %s", devicePresentName(*selected))
@@ -166,7 +166,7 @@ func (m *Menu) menuScan() error {
 
 	res, err := m.runScan(ctx, seconds)
 	if err != nil {
-		menuStderr("scan error: %s", err)
+		tell("Scan failed: %s", FormatUserError(err))
 		return nil
 	}
 
@@ -243,7 +243,7 @@ func (m *Menu) menuInfo() error {
 		return fmt.Errorf("menu info: list devices: %w", err)
 	}
 	if len(devices) == 0 {
-		menuStderr("no known devices")
+		tell("No paired devices")
 		return nil
 	}
 
@@ -269,7 +269,7 @@ func (m *Menu) showDeviceInfo(ctx context.Context, path dbus.ObjectPath) error {
 	for {
 		fresh, err := refreshDevice(ctx, m.client, path)
 		if err != nil {
-			menuStderr("error: %s", err)
+			tell("Could not read the device: %s", FormatUserError(err))
 			return nil
 		}
 
@@ -302,15 +302,15 @@ func (m *Menu) showDeviceInfo(ctx context.Context, path dbus.ObjectPath) error {
 		switch choice {
 		case trustActionLine:
 			if err := m.client.SetTrusted(ctx, path, true); err != nil {
-				menuStderr("error: %s", err)
+				tell("Could not trust %s: %s", name, FormatUserError(err))
 			} else {
-				menuStderr("trusted: %s (%s)", name, addr)
+				tell("Trusted %s (%s)", name, addr)
 			}
 		case untrustActionLine:
 			if err := m.client.SetTrusted(ctx, path, false); err != nil {
-				menuStderr("error: %s", err)
+				tell("Could not untrust %s: %s", name, FormatUserError(err))
 			} else {
-				menuStderr("untrusted: %s (%s)", name, addr)
+				tell("Untrusted %s (%s)", name, addr)
 			}
 		default:
 			continue

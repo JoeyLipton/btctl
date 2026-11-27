@@ -63,7 +63,7 @@ func (m *Menu) menuAdapterSelect(ctx context.Context) error {
 		return fmt.Errorf("menu adapter select: list adapters: %w", err)
 	}
 	if len(adapters) == 0 {
-		menuStderr("no adapters found")
+		tell("No Bluetooth adapters found")
 		return nil
 	}
 	if len(adapters) == 1 {
@@ -91,18 +91,18 @@ func (m *Menu) menuAdapterSelect(ctx context.Context) error {
 	}
 	m.client.SelectAdapter(*selected)
 	if err := state.SaveAdapter(selected.Name); err != nil {
-		menuStderr("active adapter set to %s (%s) for this session; could not remember it: %s",
+		tell("Active adapter set to %s (%s) for this session; could not remember it: %s",
 			selected.Name, selected.Address, err)
 		return nil
 	}
-	menuStderr("active adapter set to %s (%s)", selected.Name, selected.Address)
+	tell("Active adapter set to %s (%s)", selected.Name, selected.Address)
 	return nil
 }
 
 func (m *Menu) menuAdapterStatus(ctx context.Context) error {
 	a, err := m.client.ActiveAdapterInfo(ctx)
 	if err != nil {
-		menuStderr("error: %s", err)
+		tell("Could not read the adapter: %s", FormatUserError(err))
 		return nil
 	}
 	infoLines := []string{
@@ -120,34 +120,34 @@ func (m *Menu) menuAdapterStatus(ctx context.Context) error {
 func (m *Menu) menuAdapterSetPowered(ctx context.Context, on bool) {
 	path := m.client.ActiveAdapter()
 	if path == "" {
-		menuStderr("error: no active adapter")
+		tell("No Bluetooth adapter found")
 		return
 	}
 	if err := m.client.SetAdapterPowered(ctx, path, on); err != nil {
-		menuStderr("error: %s", err)
+		tell("Could not change adapter power: %s", FormatUserError(err))
 		return
 	}
 	if on {
-		menuStderr("adapter powered on")
+		tell("Adapter powered on")
 	} else {
-		menuStderr("adapter powered off")
+		tell("Adapter powered off")
 	}
 }
 
 func (m *Menu) menuAdapterSetDiscoverable(ctx context.Context, on bool) {
 	path := m.client.ActiveAdapter()
 	if path == "" {
-		menuStderr("error: no active adapter")
+		tell("No Bluetooth adapter found")
 		return
 	}
 	if err := m.client.SetDiscoverable(ctx, path, on); err != nil {
-		menuStderr("error: %s", err)
+		tell("Could not change discoverable mode: %s", FormatUserError(err))
 		return
 	}
 	if on {
-		menuStderr("adapter is now discoverable")
+		tell("Adapter is now discoverable")
 	} else {
-		menuStderr("adapter discoverable mode disabled")
+		tell("Discoverable mode disabled")
 	}
 }
 

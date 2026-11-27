@@ -79,7 +79,13 @@ var mainMenuEntries = []mainMenuEntry{
 // dispatches to a sub-menu based on selection, then returns to the main
 // menu unless the user explicitly chooses Quit or dismisses the top-level
 // menu (Escape).
-func (m *Menu) Run() error {
+func (m *Menu) Run() (err error) {
+	defer func() {
+		// main prints the error to stderr; from a keybinding that is invisible.
+		if err != nil && !stderrIsTerminal() {
+			notify(notifyAppName, "btctl pick: "+FormatUserError(err))
+		}
+	}()
 	labels := make([]string, len(mainMenuEntries))
 	for i, e := range mainMenuEntries {
 		labels[i] = e.label
@@ -288,10 +294,27 @@ func parseDmenuConfigFile(path string) ([]string, error) {
 	return args, nil
 }
 
-// menuStderr writes one operator-facing line to stderr with the shared
-// [btctl] prefix.
+// menuStderr writes one progress line to stderr with the shared [btctl]
+// prefix. Use tell for outcomes the user has to see.
 func menuStderr(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, stderrPrefix+format+"\n", args...)
+}
+
+// tell reports an outcome the user has to see. The menu is usually opened
+// from a keybinding or a status bar, where nobody reads stderr, so unless
+// stderr is a terminal the message is also shown as a desktop notification.
+func tell(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "%s%s\n", stderrPrefix, msg)
+	if !stderrIsTerminal() {
+		notify(notifyAppName, msg)
+	}
+}
+
+// stderrIsTerminal reports whether stderr is a terminal. Tests replace it.
+var stderrIsTerminal = func() bool {
+	info, err := os.Stderr.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // formatDeviceLines turns a slice of devices into the per-line strings fed
