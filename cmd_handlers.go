@@ -103,6 +103,9 @@ func runScan(ctx context.Context, client *bluez.Client, seconds int) (int, error
 	if err != nil {
 		return exitError, fmt.Errorf("scan: %w", err)
 	}
+	if ctx.Err() != nil {
+		return exitInterrupted, nil
+	}
 
 	fmt.Println()
 	fmt.Printf("Scan complete. %d new device(s) found.\n", len(devices))
@@ -242,9 +245,8 @@ func selectScanDevice(ctx context.Context, client *bluez.Client, devices []bluez
 	}
 	fmt.Print("Enter number to connect (or press Enter to skip): ")
 
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	line, err := readLine(ctx, os.Stdin)
+	if err != nil {
 		return exitError, fmt.Errorf("reading prompt input: %w", err)
 	}
 	raw := strings.TrimSpace(line)
@@ -263,4 +265,28 @@ func selectScanDevice(ctx context.Context, client *bluez.Client, devices []bluez
 	}
 
 	return connectAndReport(ctx, client, devices[n-1])
+}
+
+// readLine reads one line from r, giving up when ctx is cancelled (the read
+// itself cannot be interrupted, so it is left to finish in the background).
+func readLine(ctx context.Context, r io.Reader) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		if errors.Is(err, io.EOF) {
+			err = nil
+		}
+		ch <- result{line, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.line, res.err
+	case <-ctx.Done():
+		fmt.Println()
+		return "", ctx.Err()
+	}
 }

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joeylipton/btctl/internal/bluez"
@@ -16,9 +18,10 @@ import (
 
 // Exit codes used by btctl.
 const (
-	exitSuccess = 0
-	exitError   = 1
-	exitUsage   = 2
+	exitSuccess     = 0
+	exitError       = 1
+	exitUsage       = 2
+	exitInterrupted = 130 // 128 + SIGINT, as shells report it
 )
 
 // errBadUsage signals "print the short usage banner instead of an error
@@ -131,13 +134,23 @@ Run 'btctl help' for the full command list.
 `
 
 func main() {
-	os.Exit(runMain(os.Args[1:]))
+	// Ctrl-C or SIGTERM cancels ctx so running commands stop discovery,
+	// unregister the agent and close the picker before exiting. A second
+	// signal kills btctl at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	code := runMain(ctx, os.Args[1:])
+	stop()
+	os.Exit(code)
 }
 
 // runMain is the only function allowed to translate handler results into a
 // process exit code. It returns the exit code; the caller (main) wraps it in
 // os.Exit so we satisfy "main() is the only place os.Exit is called".
-func runMain(args []string) int {
+func runMain(ctx context.Context, args []string) int {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
 			fmt.Print(helpText)
@@ -163,8 +176,10 @@ func runMain(args []string) int {
 		return exitSuccess
 	}
 
-	code, err := dispatch(args, opts)
+	code, err := dispatch(ctx, args, opts)
 	switch {
+	case ctx.Err() != nil:
+		return exitInterrupted
 	case err == nil:
 	case errors.Is(err, errBadUsage):
 		fmt.Fprint(os.Stderr, usageText)
@@ -238,7 +253,7 @@ type parsedCommand struct {
 }
 
 // dispatch validates arguments for the chosen subcommand and invokes its handler.
-func dispatch(args []string, opts globalOptions) (int, error) {
+func dispatch(ctx context.Context, args []string, opts globalOptions) (int, error) {
 	cmd := args[0]
 
 	if cmd == "status" {
@@ -259,9 +274,6 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	if err != nil {
 		return code, err
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	client, err := bluez.New(clientOptions(opts))
 	if err != nil {

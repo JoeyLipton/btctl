@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -67,7 +68,7 @@ func runCLIInput(t *testing.T, input string, args ...string) (code int, stdout, 
 	}
 	restoreOut := capture(&os.Stdout)
 	restoreErr := capture(&os.Stderr)
-	code = runMain(args)
+	code = runMain(context.Background(), args)
 	return code, restoreOut(), restoreErr()
 }
 
