@@ -41,20 +41,27 @@ type Device struct {
 	Battery   int   // charge percentage 0-100; batteryUnavailable (-1) if absent
 }
 
-// New connects to the system bus and verifies that org.bluez is reachable by
-// issuing a GetManagedObjects probe on the root object. When verbose is true,
-// each outgoing D-Bus method call is logged to stderr.
+// New opens a private connection to the system bus and verifies that org.bluez
+// is reachable by issuing a GetManagedObjects probe on the root object. When
+// verbose is true, each outgoing D-Bus method call is logged to stderr.
+//
+// The connection is private (not godbus's shared SystemBus) because Close
+// tears it down; closing the shared connection would break any other user of
+// it in the same process. DBUS_SYSTEM_BUS_ADDRESS is honoured, which is how the
+// tests point the client at a fake bluetoothd.
 func New(ctx context.Context, verbose bool) (*Client, error) {
-	conn, err := dbus.SystemBus()
+	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connect system D-Bus: %w", err)
 	}
 	c := &Client{conn: conn, verbose: verbose}
 	if err := c.callCtx(ctx, bluezRootPath, dbusObjectManagerIface, "GetManagedObjects"); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("probe BlueZ: %w", err)
 	}
 	adapters, err := c.ListAdapters(ctx)
 	if err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("init bluetooth client: %w", err)
 	}
 	if len(adapters) > 0 {
