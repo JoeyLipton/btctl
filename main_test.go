@@ -105,3 +105,15 @@ func TestParseGlobalFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestVersion(t *testing.T) {
+	old := version
+	t.Cleanup(func() { version = old })
+	version = "v9.8.7"
+	for _, args := range [][]string{{"--version"}, {"version"}, {"list", "--version"}} {
+		code, stdout, _ := runCLI(t, args...)
+		if code != exitSuccess || !strings.HasPrefix(stdout, "btctl v9.8.7") {
+			t.Errorf("%v = %d %q, want 'btctl v9.8.7 ...'", args, code, stdout)
+		}
+	}
+}

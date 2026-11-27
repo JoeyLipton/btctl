@@ -46,9 +46,10 @@ Global options (accepted anywhere on the command line):
   -v, --verbose          Log every D-Bus call to stderr
   -a, --adapter <hciN>   Use this adapter for this run (overrides adapter select)
   -h, --help             Show this help page
+  --version              Show the btctl version
 
 Commands:
-  list                  List all known paired/trusted devices
+  list                  List paired devices (-v adds a trusted column)
   connect    <address>  Connect to a device by MAC address (pairs it first
                         if needed; the device must have been seen by a scan)
   pair       <address>  Pair with and trust a device without connecting
@@ -72,6 +73,7 @@ Commands:
   adapter power <on|off>       Power the active adapter on or off
   adapter discoverable <on|off>  Enable or disable discoverable mode
   adapter select <hciN>  Set the active adapter and remember it for later runs
+  version               Show the btctl version
   help                  Show this help page
 
 Behaviour:
@@ -109,11 +111,13 @@ Exit codes:
   0   Success
   1   Runtime error
   2   Usage error
+  130 Interrupted (Ctrl-C)
 
 Discoverable mode:
   When discoverable mode is enabled, your Bluetooth adapter is visible
-  to nearby devices scanning for Bluetooth hosts. This is required if
-  another device needs to initiate pairing with your machine.
+  to nearby devices scanning for Bluetooth hosts. btctl only accepts
+  pairing it starts itself (connect, pair, scan, pick), so pair from
+  btctl rather than from the other device.
 
   Discoverable mode is disabled by default and has no timeout when enabled
   via btctl (it remains on until you disable it).
@@ -152,8 +156,12 @@ func main() {
 // os.Exit so we satisfy "main() is the only place os.Exit is called".
 func runMain(ctx context.Context, args []string) int {
 	for _, a := range args {
-		if a == "-h" || a == "--help" {
+		switch a {
+		case "-h", "--help":
 			fmt.Print(helpText)
+			return exitSuccess
+		case "--version":
+			fmt.Println(versionString())
 			return exitSuccess
 		}
 	}
@@ -171,8 +179,12 @@ func runMain(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
-	if args[0] == "help" {
+	switch args[0] {
+	case "help":
 		fmt.Print(helpText)
+		return exitSuccess
+	case "version":
+		fmt.Println(versionString())
 		return exitSuccess
 	}
 
