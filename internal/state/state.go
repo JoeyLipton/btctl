@@ -11,13 +11,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/joeylipton/btctl/internal/bluez"
 )
 
 const adapterFile = "adapter"
-
-var adapterNamePattern = regexp.MustCompile(`^hci[0-9]+$`)
 
 // Dir returns the directory btctl stores state in.
 func Dir() (string, error) {
@@ -45,7 +44,7 @@ func LoadAdapter() (string, error) {
 		return "", fmt.Errorf("read saved adapter: %w", err)
 	}
 	name := strings.TrimSpace(string(data))
-	if !adapterNamePattern.MatchString(name) {
+	if !bluez.IsAdapterName(name) {
 		return "", fmt.Errorf("saved adapter %q in %s is not an hciN name", name, filepath.Join(dir, adapterFile))
 	}
 	return name, nil
@@ -53,7 +52,7 @@ func LoadAdapter() (string, error) {
 
 // SaveAdapter records name as the adapter future btctl runs should use.
 func SaveAdapter(name string) error {
-	if !adapterNamePattern.MatchString(name) {
+	if !bluez.IsAdapterName(name) {
 		return fmt.Errorf("save adapter: %q is not an hciN name", name)
 	}
 	dir, err := Dir()

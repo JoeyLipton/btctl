@@ -19,3 +19,11 @@ func Truncate(s string, width int) string {
 	}
 	return s
 }
+
+// YesNo renders a bool as "yes" or "no".
+func YesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}

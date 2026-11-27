@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/bluez"
 	"github.com/joeylipton/btctl/internal/state"
+	"github.com/joeylipton/btctl/internal/textfmt"
 )
 
-func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (int, error) {
+func runAdapter(ctx context.Context, client *bluez.Client, args []string) (int, error) {
 	sub := args[0]
 	switch sub {
 	case "list":
@@ -28,7 +29,7 @@ func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (i
 	}
 }
 
-func runAdapterList(ctx context.Context, client *bluetooth.Client) (int, error) {
+func runAdapterList(ctx context.Context, client *bluez.Client) (int, error) {
 	adapters, err := client.ListAdapters(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter list: %w", err)
@@ -52,7 +53,7 @@ func runAdapterList(ctx context.Context, client *bluetooth.Client) (int, error) 
 	return exitSuccess, nil
 }
 
-func runAdapterStatus(ctx context.Context, client *bluetooth.Client) (int, error) {
+func runAdapterStatus(ctx context.Context, client *bluez.Client) (int, error) {
 	a, err := client.ActiveAdapterInfo(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter status: %w", err)
@@ -60,13 +61,13 @@ func runAdapterStatus(ctx context.Context, client *bluetooth.Client) (int, error
 	fmt.Printf("Name           %s\n", a.Name)
 	fmt.Printf("Address        %s\n", a.Address)
 	fmt.Printf("Alias          %s\n", a.Alias)
-	fmt.Printf("Powered        %s\n", yesNo(a.Powered))
-	fmt.Printf("Discovering    %s\n", yesNo(a.Discovering))
-	fmt.Printf("Discoverable   %s\n", yesNo(a.Discoverable))
+	fmt.Printf("Powered        %s\n", textfmt.YesNo(a.Powered))
+	fmt.Printf("Discovering    %s\n", textfmt.YesNo(a.Discovering))
+	fmt.Printf("Discoverable   %s\n", textfmt.YesNo(a.Discoverable))
 	return exitSuccess, nil
 }
 
-func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
+func runAdapterPower(ctx context.Context, client *bluez.Client, on bool) (int, error) {
 	if err := client.SetAdapterPowered(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter power: %w", err)
 	}
@@ -78,7 +79,7 @@ func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (in
 	return exitSuccess, nil
 }
 
-func runAdapterDiscoverable(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
+func runAdapterDiscoverable(ctx context.Context, client *bluez.Client, on bool) (int, error) {
 	if err := client.SetDiscoverable(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter discoverable: %w", err)
 	}
@@ -90,7 +91,7 @@ func runAdapterDiscoverable(ctx context.Context, client *bluetooth.Client, on bo
 	return exitSuccess, nil
 }
 
-func runAdapterSelect(ctx context.Context, client *bluetooth.Client, name string) (int, error) {
+func runAdapterSelect(ctx context.Context, client *bluez.Client, name string) (int, error) {
 	adapters, err := client.ListAdapters(ctx)
 	if err != nil {
 		return exitError, fmt.Errorf("adapter select: %w", err)
@@ -105,12 +106,5 @@ func runAdapterSelect(ctx context.Context, client *bluetooth.Client, name string
 			return exitSuccess, nil
 		}
 	}
-	return exitError, fmt.Errorf("adapter select: %w: %s", bluetooth.ErrAdapterNotFound, name)
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
+	return exitError, fmt.Errorf("adapter select: %w: %s", bluez.ErrAdapterNotFound, name)
 }

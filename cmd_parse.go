@@ -6,7 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/bluez"
+	"github.com/joeylipton/btctl/internal/menu"
 )
 
 // pickUsageLine is reused by every parsePickArgs error path so the usage hint
@@ -54,7 +55,7 @@ func parseCommandFlags(args []string) (parsedCommand, int, error) {
 			return parsed, exitUsage, errBadUsage
 		}
 		parsed.address = args[1]
-		if !macAddressRegex.MatchString(parsed.address) {
+		if !bluez.IsAddress(parsed.address) {
 			return parsed, exitUsage, fmt.Errorf("invalid MAC address: %s", parsed.address)
 		}
 	default:
@@ -64,7 +65,7 @@ func parseCommandFlags(args []string) (parsedCommand, int, error) {
 }
 
 // parsePickFlags parses flags for the pick subcommand.
-func parsePickFlags(args []string) (bluetooth.PickerConfig, int, error) {
+func parsePickFlags(args []string) (menu.Config, int, error) {
 	var sawRofi, sawDmenu bool
 	var configFile string
 
@@ -79,36 +80,36 @@ func parsePickFlags(args []string) (bluetooth.PickerConfig, int, error) {
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "flag requires an argument: %s\n", a)
 				fmt.Fprintln(os.Stderr, pickUsageLine)
-				return bluetooth.PickerConfig{}, exitUsage, errBadUsage
+				return menu.Config{}, exitUsage, errBadUsage
 			}
 			configFile = args[i+1]
 			i++
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag for pick: %s\n", a)
 			fmt.Fprintln(os.Stderr, pickUsageLine)
-			return bluetooth.PickerConfig{}, exitUsage, errBadUsage
+			return menu.Config{}, exitUsage, errBadUsage
 		}
 	}
 	if sawRofi && sawDmenu {
 		fmt.Fprintln(os.Stderr, "cannot use --rofi and --dmenu together")
-		return bluetooth.PickerConfig{}, exitUsage, errBadUsage
+		return menu.Config{}, exitUsage, errBadUsage
 	}
 
-	cfg := bluetooth.PickerConfig{ConfigFile: configFile}
+	cfg := menu.Config{ConfigFile: configFile}
 	switch {
 	case sawRofi:
-		cfg.Backend = bluetooth.BackendRofi
+		cfg.Backend = menu.BackendRofi
 	case sawDmenu:
-		cfg.Backend = bluetooth.BackendDmenu
+		cfg.Backend = menu.BackendDmenu
 	default:
-		cfg.Backend = bluetooth.BackendAuto
+		cfg.Backend = menu.BackendAuto
 	}
 	return cfg, exitSuccess, nil
 }
 
 // parseScanArgs parses the flag set accepted by `btctl scan`.
 func parseScanArgs(args []string) (int, error) {
-	seconds := int(bluetooth.DefaultScanDuration().Seconds())
+	seconds := int(bluez.DefaultScanDuration.Seconds())
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -125,9 +126,9 @@ func parseScanArgs(args []string) (int, error) {
 				return 0, fmt.Errorf("scan: %s must be a positive integer, got %d", args[i], n)
 			}
 			d := time.Duration(n) * time.Second
-			if d < bluetooth.MinScanDuration() || d > bluetooth.MaxScanDuration() {
+			if d < bluez.MinScanDuration || d > bluez.MaxScanDuration {
 				return 0, fmt.Errorf("scan: duration must be between %s and %s, got %d seconds",
-					bluetooth.MinScanDuration(), bluetooth.MaxScanDuration(), n)
+					bluez.MinScanDuration, bluez.MaxScanDuration, n)
 			}
 			seconds = n
 			i++
@@ -159,7 +160,7 @@ func parseAdapterSubcommand(args []string) (subcommand, target string, code int,
 		if len(args) != 2 {
 			return "", "", exitUsage, errBadUsage
 		}
-		if !hciNameRegex.MatchString(args[1]) {
+		if !bluez.IsAdapterName(args[1]) {
 			return "", "", exitUsage, fmt.Errorf("invalid adapter name: %s", args[1])
 		}
 		return sub, args[1], exitSuccess, nil

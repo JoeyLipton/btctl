@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
+	"time"
 
-	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/bluez"
+	"github.com/joeylipton/btctl/internal/desktop"
+	"github.com/joeylipton/btctl/internal/menu"
 	"github.com/joeylipton/btctl/internal/state"
 )
 
@@ -24,11 +26,13 @@ const (
 // produced its own descriptive message.
 var errBadUsage = errors.New("bad usage")
 
-// macAddressRegex matches a colon-separated 48-bit MAC address.
-var macAddressRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
-
-// hciNameRegex matches a BlueZ hci adapter name (e.g. hci0).
-var hciNameRegex = regexp.MustCompile(`^hci[0-9]+$`)
+// Deadlines for the client calls main makes itself.
+const (
+	// agentUnregisterTimeout bounds the deferred UnregisterAgent call.
+	agentUnregisterTimeout = 3 * time.Second
+	// statusTimeout bounds `btctl status`, which status bars poll.
+	statusTimeout = 5 * time.Second
+)
 
 const helpText = `btctl - a minimal Bluetooth manager for Linux
 
@@ -147,7 +151,7 @@ func runMain(args []string) int {
 		fmt.Fprint(os.Stderr, usageText)
 		return exitUsage
 	}
-	bluetooth.SetVerbose(opts.verbose)
+	desktop.SetVerbose(opts.verbose)
 
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usageText)
@@ -165,7 +169,7 @@ func runMain(args []string) int {
 	case errors.Is(err, errBadUsage):
 		fmt.Fprint(os.Stderr, usageText)
 	default:
-		fmt.Fprintf(os.Stderr, "error: %s\n", bluetooth.FormatUserError(err))
+		fmt.Fprintf(os.Stderr, "error: %s\n", bluez.FormatUserError(err))
 		if opts.verbose {
 			fmt.Fprintf(os.Stderr, "[v] detail: %v\n", err)
 		}
@@ -204,24 +208,24 @@ func parseGlobalFlags(args []string) (globalOptions, []string, error) {
 			rest = append(rest, a)
 		}
 	}
-	if opts.adapter != "" && !hciNameRegex.MatchString(opts.adapter) {
+	if opts.adapter != "" && !bluez.IsAdapterName(opts.adapter) {
 		return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
 	}
 	return opts, rest, nil
 }
 
-// clientOptions builds the bluetooth.Options for this run. An adapter given
+// clientOptions builds the bluez.Options for this run. An adapter given
 // with -a must exist; the adapter remembered by "adapter select" is only a
 // preference, because it may be an unplugged USB dongle.
-func clientOptions(opts globalOptions) bluetooth.Options {
+func clientOptions(opts globalOptions) bluez.Options {
 	if opts.adapter != "" {
-		return bluetooth.Options{Verbose: opts.verbose, Adapter: opts.adapter}
+		return bluez.Options{Verbose: opts.verbose, Adapter: opts.adapter}
 	}
 	saved, err := state.LoadAdapter()
 	if err != nil && opts.verbose {
 		fmt.Fprintf(os.Stderr, "[v] ignoring saved adapter: %v\n", err)
 	}
-	return bluetooth.Options{Verbose: opts.verbose, Adapter: saved, AdapterOptional: true}
+	return bluez.Options{Verbose: opts.verbose, Adapter: saved, AdapterOptional: true}
 }
 
 // parsedCommand holds validated arguments for a subcommand handler.
@@ -229,7 +233,7 @@ type parsedCommand struct {
 	name        string
 	address     string
 	scanSeconds int
-	pickCfg     bluetooth.PickerConfig
+	pickCfg     menu.Config
 	adapterArgs []string
 }
 
@@ -259,7 +263,7 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := bluetooth.New(clientOptions(opts))
+	client, err := bluez.New(clientOptions(opts))
 	if err != nil {
 		return exitError, fmt.Errorf("init bluetooth client: %w", err)
 	}
@@ -268,12 +272,12 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	// Only commands that can pair register an agent: while registered, btctl
 	// is BlueZ's default agent. The menu answers pairing requests with
 	// pickers; the CLI commands use the terminal.
-	var menu *bluetooth.Menu
+	var picker *menu.Menu
 	if commandCanPair(parsed.name) {
-		var handler bluetooth.PairingHandler = bluetooth.CLIHandler{Interactive: isTerminal(os.Stdin)}
+		var handler bluez.PairingHandler = cliPairing{Interactive: isTerminal(os.Stdin)}
 		if parsed.name == "pick" {
-			menu = bluetooth.NewMenu(client, parsed.pickCfg)
-			handler = menu.PairingHandler()
+			picker = menu.New(client, parsed.pickCfg)
+			handler = picker.PairingHandler()
 		}
 		unregister, err := registerAgent(ctx, client, handler)
 		if err != nil {
@@ -282,7 +286,7 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 		defer unregister()
 	}
 
-	return executeCommand(ctx, client, menu, opts.verbose, parsed)
+	return executeCommand(ctx, client, picker, opts.verbose, parsed)
 }
 
 // commandCanPair reports whether a subcommand may start a pairing and
@@ -303,20 +307,20 @@ func isTerminal(f *os.File) bool {
 
 // registerAgent registers a pairing agent backed by handler and returns a
 // function that unregisters it.
-func registerAgent(ctx context.Context, client *bluetooth.Client, handler bluetooth.PairingHandler) (func(), error) {
-	agent := bluetooth.NewAgent(handler)
+func registerAgent(ctx context.Context, client *bluez.Client, handler bluez.PairingHandler) (func(), error) {
+	agent := bluez.NewAgent(handler)
 	if err := client.RegisterAgent(ctx, agent); err != nil {
 		return nil, fmt.Errorf("register agent: %w", err)
 	}
 	return func() {
-		uctx, ucancel := context.WithTimeout(context.Background(), bluetooth.AgentUnregisterTimeout())
+		uctx, ucancel := context.WithTimeout(context.Background(), agentUnregisterTimeout)
 		defer ucancel()
 		_ = client.UnregisterAgent(uctx, agent)
 	}, nil
 }
 
 // executeCommand dispatches to the handler for a validated parsedCommand.
-func executeCommand(ctx context.Context, client *bluetooth.Client, menu *bluetooth.Menu, verbose bool, parsed parsedCommand) (int, error) {
+func executeCommand(ctx context.Context, client *bluez.Client, picker *menu.Menu, verbose bool, parsed parsedCommand) (int, error) {
 	switch parsed.name {
 	case "list":
 		return runList(ctx, client, verbose)
@@ -337,7 +341,7 @@ func executeCommand(ctx context.Context, client *bluetooth.Client, menu *bluetoo
 	case "adapter":
 		return runAdapter(ctx, client, parsed.adapterArgs)
 	case "pick":
-		return runPick(menu)
+		return runPick(ctx, picker)
 	default:
 		return exitUsage, errBadUsage
 	}
