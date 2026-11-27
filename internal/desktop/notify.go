@@ -55,13 +55,6 @@ type notifyResolver struct {
 // notifyState is the process-wide notifier. Tests replace it.
 var notifyState = &notifyResolver{}
 
-// disabledNotifier returns a resolver that never sends anything.
-func disabledNotifier() *notifyResolver {
-	r := &notifyResolver{}
-	r.once.Do(func() {})
-	return r
-}
-
 // verbose controls whether notify-send failures are logged to stderr. It is
 // atomic because background goroutines read it.
 var verbose atomic.Bool
