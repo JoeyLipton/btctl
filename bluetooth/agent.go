@@ -186,7 +186,7 @@ func (a *Agent) confirm(req PairingRequest, method string) *dbus.Error {
 // agentLogVerbose writes only when the package verbose flag is set. What the
 // user must act on is shown by the PairingHandler, not logged here.
 func agentLogVerbose(format string, args ...interface{}) {
-	if notifyVerbose {
+	if notifyVerbose.Load() {
 		fmt.Fprintf(os.Stderr, "[agent] "+format+"\n", args...)
 	}
 }

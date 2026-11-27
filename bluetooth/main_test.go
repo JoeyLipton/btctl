@@ -1,16 +1,27 @@
 package bluetooth
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/joeylipton/btctl/internal/testenv"
 )
 
 func TestMain(m *testing.M) {
-	// Never pop up real desktop notifications from tests.
+	// Never start real desktop programs (notifications, rofi, zenity, ...).
+	cleanup, err := testenv.IsolatePATH()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	notifyState = disabledNotifier()
-	os.Exit(m.Run())
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }
 
 // fakePickerScript stands in for rofi and dmenu. Each invocation logs its
@@ -71,5 +82,39 @@ func TestFakePickerFollowsSteps(t *testing.T) {
 	}
 	if log := shown(); !strings.Contains(log, "-p first") || !strings.Contains(log, "-p second") {
 		t.Errorf("picker log missing prompts:\n%s", log)
+	}
+}
+
+// captureNotifications routes notify() to a fake notify-send, treats stderr
+// as invisible (as when the menu is opened from a keybinding), and returns a
+// function that reads the notifications sent so far, one per line.
+func captureNotifications(t *testing.T) (sent func() string) {
+	t.Helper()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "notifications")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + out + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "notify-send"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldState, oldTerminal := notifyState, stderrIsTerminal
+	notifyState = &notifyResolver{}
+	stderrIsTerminal = func() bool { return false }
+	t.Cleanup(func() { notifyState, stderrIsTerminal = oldState, oldTerminal })
+	return func() string {
+		data, _ := os.ReadFile(out)
+		return string(data)
+	}
+}
+
+// waitForNotification waits until a notification containing want was sent.
+func waitForNotification(t *testing.T, sent func() string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(sent(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no notification containing %q; sent:\n%s", want, sent())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

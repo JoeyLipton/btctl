@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Notification display times in milliseconds.
@@ -45,12 +46,13 @@ func disabledNotifier() *notifyResolver {
 	return r
 }
 
-// notifyVerbose controls whether notify-send failures are logged to stderr.
-var notifyVerbose bool
+// notifyVerbose controls whether notify-send failures and agent traffic are
+// logged to stderr. It is atomic because background goroutines read it.
+var notifyVerbose atomic.Bool
 
 // SetVerbose controls whether notify logs failures to stderr. main.go calls
 // this after parsing the -v flag.
-func SetVerbose(v bool) { notifyVerbose = v }
+func SetVerbose(v bool) { notifyVerbose.Store(v) }
 
 // resolveNotifyState performs the one-time notify-send PATH lookup. It must be
 // the only place that resolves availability so the sync.Once is never consumed
@@ -102,13 +104,13 @@ func notifyWithDuration(title, body string, durationMs int) {
 	// started notify-send finishes on its own after btctl is gone. Only the
 	// wait (reaping the child) happens in the background.
 	if err := cmd.Start(); err != nil {
-		if notifyVerbose {
+		if notifyVerbose.Load() {
 			fmt.Fprintf(os.Stderr, "%snotify-send failed: %v\n", stderrPrefix, err)
 		}
 		return
 	}
 	go func() {
-		if err := cmd.Wait(); err != nil && notifyVerbose {
+		if err := cmd.Wait(); err != nil && notifyVerbose.Load() {
 			fmt.Fprintf(os.Stderr, "%snotify-send failed: %v\n", stderrPrefix, err)
 		}
 	}()

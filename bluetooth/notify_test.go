@@ -15,6 +15,8 @@ func TestNotifyChildProcess(t *testing.T) {
 	if os.Getenv("BTCTL_NOTIFY_CHILD") == "" {
 		t.Skip("helper process for TestNotifyIsNotLostOnExit")
 	}
+	// TestMain put do-nothing stubs first on PATH; put the fake before them.
+	os.Setenv("PATH", os.Getenv("BTCTL_NOTIFY_FAKE_DIR")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	notifyState = &notifyResolver{}
 	notify("btctl", "Disconnected from Speaker")
 	os.Exit(0)
@@ -34,8 +36,7 @@ func TestNotifyIsNotLostOnExit(t *testing.T) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestNotifyChildProcess$")
 		cmd.Env = append(os.Environ(),
 			"BTCTL_NOTIFY_CHILD=1",
-			"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent", // never reach a real desktop
+			"BTCTL_NOTIFY_FAKE_DIR="+dir,
 		)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("child: %v\n%s", err, output)
