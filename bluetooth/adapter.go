@@ -31,11 +31,15 @@ type Adapter struct {
 
 // ListAdapters returns every hci* adapter known to BlueZ, sorted by Name.
 func (c *Client) ListAdapters(ctx context.Context) ([]Adapter, error) {
-	objects, err := c.getManagedObjects(ctx)
+	objects, _, err := c.snapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list adapters: %w", err)
 	}
+	return adaptersIn(objects), nil
+}
 
+// adaptersIn extracts the hci* adapters from an object snapshot, sorted by Name.
+func adaptersIn(objects managedObjects) []Adapter {
 	adapters := make([]Adapter, 0)
 	for path, ifaces := range objects {
 		props, ok := ifaces[bluezAdapterIface]
@@ -52,16 +56,19 @@ func (c *Client) ListAdapters(ctx context.Context) ([]Adapter, error) {
 	sort.Slice(adapters, func(i, j int) bool {
 		return adapters[i].Name < adapters[j].Name
 	})
-	return adapters, nil
+	return adapters
 }
 
-// SetActiveAdapter selects the adapter that Scan and adapter control target.
-func (c *Client) SetActiveAdapter(path dbus.ObjectPath) {
+// SelectAdapter makes a the adapter every later operation on this client
+// targets. Persisting the choice across runs is the caller's job.
+func (c *Client) SelectAdapter(a Adapter) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	c.activeAdapter = path
+	c.adapterName = a.Name
+	c.strictAdapter = true
+	c.activeAdapter = a.Path
 	c.mu.Unlock()
 }
 
@@ -78,20 +85,14 @@ func (c *Client) ActiveAdapter() dbus.ObjectPath {
 
 // ActiveAdapterInfo returns the Adapter snapshot for the active adapter.
 func (c *Client) ActiveAdapterInfo(ctx context.Context) (Adapter, error) {
-	path := c.ActiveAdapter()
+	objects, path, err := c.snapshot(ctx)
+	if err != nil {
+		return Adapter{}, fmt.Errorf("adapter info: %w", err)
+	}
 	if path == "" {
 		return Adapter{}, fmt.Errorf("adapter info: %w", ErrNoAdapter)
 	}
-	adapters, err := c.ListAdapters(ctx)
-	if err != nil {
-		return Adapter{}, err
-	}
-	for _, a := range adapters {
-		if a.Path == path {
-			return a, nil
-		}
-	}
-	return Adapter{}, fmt.Errorf("adapter info %s: %w", path, ErrAdapterNotReady)
+	return parseAdapter(path, objects[path][bluezAdapterIface]), nil
 }
 
 // GetAdapterPowered reports whether the active adapter is powered.

@@ -20,6 +20,7 @@ var (
 	ErrNoAdapter         = errors.New("no Bluetooth adapter found")
 	ErrDeviceNotFound    = errors.New("device not found")
 	ErrAdapterNotReady   = errors.New("adapter not ready")
+	ErrAdapterNotFound   = errors.New("no such adapter")
 	ErrConnectInProgress = errors.New("connection already in progress")
 
 	// ErrBinaryNotFound is returned by resolveBinary when an external

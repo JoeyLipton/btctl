@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/state"
 )
 
 // Exit codes used by btctl.
@@ -31,7 +33,12 @@ var hciNameRegex = regexp.MustCompile(`^hci[0-9]+$`)
 const helpText = `btctl - a minimal Bluetooth manager for Linux
 
 Usage:
-  btctl <command> [options]
+  btctl [-v] [-a <hciN>] <command> [options]
+
+Global options:
+  -v, --verbose          Log every D-Bus call to stderr
+  -a, --adapter <hciN>   Use this adapter for this run (overrides adapter select)
+  -h, --help             Show this help page
 
 Commands:
   list                  List all known paired/trusted devices
@@ -55,15 +62,15 @@ Commands:
   adapter status        Show status of the active adapter
   adapter power <on|off>       Power the active adapter on or off
   adapter discoverable <on|off>  Enable or disable discoverable mode
-  adapter select <hciN>  Set the active adapter by name
+  adapter select <hciN>  Set the active adapter and remember it for later runs
   help                  Show this help page
 
 Behaviour:
   btctl automatically marks devices as trusted when connecting. Trusted devices
   reconnect without prompts. Use btctl untrust to remove trust without forgetting
   the device.
-  Adapter operations (scan, power, discoverable) use the active adapter.
-  The default active adapter is the first hci* adapter found at startup.
+  Every command uses the active adapter: the one given with -a, otherwise the
+  one saved by "btctl adapter select", otherwise the first hci* adapter.
 
 Options for scan:
   -t, --scan-time <seconds>   How long to scan (must be a positive integer)
@@ -111,7 +118,7 @@ Discoverable mode:
   for you.
 `
 
-const usageText = `Usage: btctl <command> [options]
+const usageText = `Usage: btctl [-v] [-a <hciN>] <command> [options]
 
 Run 'btctl help' for the full command list.
 `
@@ -131,14 +138,17 @@ func runMain(args []string) int {
 		}
 	}
 
-	verbose := false
-	if len(args) > 0 && args[0] == "-v" {
-		if !(len(args) >= 2 && args[1] == "status") {
-			verbose = true
-		}
-		args = args[1:]
+	opts, args, err := parseGlobalFlags(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		fmt.Fprint(os.Stderr, usageText)
+		return exitUsage
 	}
-	bluetooth.SetVerbose(verbose)
+	// status feeds status bars, which must never see stderr noise.
+	if len(args) > 0 && args[0] == "status" {
+		opts.verbose = false
+	}
+	bluetooth.SetVerbose(opts.verbose)
 
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usageText)
@@ -150,18 +160,69 @@ func runMain(args []string) int {
 		return exitSuccess
 	}
 
-	code, err := dispatch(args, verbose)
+	code, err := dispatch(args, opts)
 	switch {
 	case err == nil:
 	case errors.Is(err, errBadUsage):
 		fmt.Fprint(os.Stderr, usageText)
 	default:
 		fmt.Fprintf(os.Stderr, "error: %s\n", bluetooth.FormatUserError(err))
-		if verbose {
+		if opts.verbose {
 			fmt.Fprintf(os.Stderr, "[v] detail: %v\n", err)
 		}
 	}
 	return code
+}
+
+// globalOptions are the flags accepted before the subcommand.
+type globalOptions struct {
+	verbose bool
+	adapter string // from -a/--adapter; "" when not given
+}
+
+// parseGlobalFlags consumes leading global flags and returns the rest.
+func parseGlobalFlags(args []string) (globalOptions, []string, error) {
+	var opts globalOptions
+	for len(args) > 0 {
+		a := args[0]
+		switch {
+		case a == "-v" || a == "--verbose":
+			opts.verbose = true
+			args = args[1:]
+		case a == "-a" || a == "--adapter":
+			if len(args) < 2 {
+				return opts, nil, fmt.Errorf("%s requires an adapter name (e.g. hci0)", a)
+			}
+			opts.adapter = args[1]
+			args = args[2:]
+		case strings.HasPrefix(a, "--adapter="):
+			opts.adapter = strings.TrimPrefix(a, "--adapter=")
+			args = args[1:]
+		default:
+			if opts.adapter != "" && !hciNameRegex.MatchString(opts.adapter) {
+				return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
+			}
+			return opts, args, nil
+		}
+	}
+	if opts.adapter != "" && !hciNameRegex.MatchString(opts.adapter) {
+		return opts, nil, fmt.Errorf("invalid adapter name: %s", opts.adapter)
+	}
+	return opts, args, nil
+}
+
+// clientOptions builds the bluetooth.Options for this run. An adapter given
+// with -a must exist; the adapter remembered by "adapter select" is only a
+// preference, because it may be an unplugged USB dongle.
+func clientOptions(opts globalOptions) bluetooth.Options {
+	if opts.adapter != "" {
+		return bluetooth.Options{Verbose: opts.verbose, Adapter: opts.adapter}
+	}
+	saved, err := state.LoadAdapter()
+	if err != nil && opts.verbose {
+		fmt.Fprintf(os.Stderr, "[v] ignoring saved adapter: %v\n", err)
+	}
+	return bluetooth.Options{Verbose: opts.verbose, Adapter: saved, AdapterOptional: true}
 }
 
 // parsedCommand holds validated arguments for a subcommand handler.
@@ -174,7 +235,7 @@ type parsedCommand struct {
 }
 
 // dispatch validates arguments for the chosen subcommand and invokes its handler.
-func dispatch(args []string, verbose bool) (int, error) {
+func dispatch(args []string, opts globalOptions) (int, error) {
 	cmd := args[0]
 
 	if cmd == "status" {
@@ -182,7 +243,7 @@ func dispatch(args []string, verbose bool) (int, error) {
 			fmt.Fprintln(os.Stderr, "usage: btctl status takes no arguments")
 			return exitUsage, nil
 		}
-		return runStatus(verbose)
+		return runStatus(clientOptions(opts))
 	}
 
 	if cmd == "forget" && len(args) == 1 {
@@ -199,14 +260,14 @@ func dispatch(args []string, verbose bool) (int, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	return runWithAgent(ctx, verbose, parsed.name == "pick", func(client *bluetooth.Client, agent *bluetooth.Agent) (int, error) {
-		return executeCommand(ctx, client, agent, verbose, parsed)
+	return runWithAgent(ctx, clientOptions(opts), parsed.name == "pick", func(client *bluetooth.Client, agent *bluetooth.Agent) (int, error) {
+		return executeCommand(ctx, client, agent, opts.verbose, parsed)
 	})
 }
 
 // runWithAgent opens a client, registers the pairing agent, and runs fn.
-func runWithAgent(ctx context.Context, verbose, pickInteractive bool, fn func(*bluetooth.Client, *bluetooth.Agent) (int, error)) (int, error) {
-	client, err := bluetooth.New(ctx, verbose)
+func runWithAgent(ctx context.Context, copts bluetooth.Options, pickInteractive bool, fn func(*bluetooth.Client, *bluetooth.Agent) (int, error)) (int, error) {
+	client, err := bluetooth.New(ctx, copts)
 	if err != nil {
 		return exitError, fmt.Errorf("init bluetooth client: %w", err)
 	}

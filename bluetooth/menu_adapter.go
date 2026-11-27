@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/joeylipton/btctl/internal/state"
 )
 
 // adapterMenuEntries are the fixed options in the adapter settings sub-menu.
@@ -86,7 +88,12 @@ func (m *Menu) menuAdapterSelect(ctx context.Context) error {
 	if selected == nil {
 		return nil
 	}
-	m.client.SetActiveAdapter(selected.Path)
+	m.client.SelectAdapter(*selected)
+	if err := state.SaveAdapter(selected.Name); err != nil {
+		menuStderr("active adapter set to %s (%s) for this session; could not remember it: %s",
+			selected.Name, selected.Address, err)
+		return nil
+	}
 	menuStderr("active adapter set to %s (%s)", selected.Name, selected.Address)
 	return nil
 }

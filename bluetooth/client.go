@@ -6,6 +6,7 @@ package bluetooth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -22,12 +23,28 @@ type managedObjects = map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
 // Client wraps a system D-Bus connection used to talk to BlueZ.
 type Client struct {
-	conn            *dbus.Conn
-	verbose         bool
-	mu              sync.Mutex // guards activeAdapter and connectionLocks
+	conn     *dbus.Conn
+	verbose  bool
+	timeouts timeouts
+
+	mu              sync.Mutex // guards the fields below
+	adapterName     string     // preferred adapter ("hci1"); "" means the first one
+	strictAdapter   bool       // fail instead of falling back when adapterName is missing
 	activeAdapter   dbus.ObjectPath
 	connectionLocks map[dbus.ObjectPath]*sync.Mutex
-	timeouts        timeouts
+}
+
+// Options configures New.
+type Options struct {
+	// Verbose logs every outgoing D-Bus method call to stderr.
+	Verbose bool
+	// Adapter selects the adapter by name (e.g. "hci1"). Empty selects the
+	// first adapter BlueZ reports.
+	Adapter string
+	// AdapterOptional falls back to the first adapter when Adapter does not
+	// exist instead of failing. It is used for the remembered adapter, which
+	// may be a USB dongle that has since been unplugged.
+	AdapterOptional bool
 }
 
 // timeouts groups every deadline the client applies. They live on the Client
@@ -66,33 +83,73 @@ type Device struct {
 	Battery   int   // charge percentage 0-100; batteryUnavailable (-1) if absent
 }
 
-// New opens a private connection to the system bus and verifies that org.bluez
-// is reachable by issuing a GetManagedObjects probe on the root object. When
-// verbose is true, each outgoing D-Bus method call is logged to stderr.
+// New opens a private connection to the system bus, verifies that org.bluez
+// is reachable and resolves the active adapter (see Options).
 //
 // The connection is private (not godbus's shared SystemBus) because Close
 // tears it down; closing the shared connection would break any other user of
 // it in the same process. DBUS_SYSTEM_BUS_ADDRESS is honoured, which is how the
 // tests point the client at a fake bluetoothd.
-func New(ctx context.Context, verbose bool) (*Client, error) {
+func New(ctx context.Context, opts Options) (*Client, error) {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connect system D-Bus: %w", err)
 	}
-	c := &Client{conn: conn, verbose: verbose, timeouts: defaultTimeouts()}
-	if err := c.callCtx(ctx, bluezRootPath, dbusObjectManagerIface, "GetManagedObjects"); err != nil {
+	c := &Client{
+		conn:          conn,
+		verbose:       opts.Verbose,
+		timeouts:      defaultTimeouts(),
+		adapterName:   opts.Adapter,
+		strictAdapter: opts.Adapter != "" && !opts.AdapterOptional,
+	}
+	if _, _, err := c.snapshot(ctx); err != nil {
 		_ = conn.Close()
+		if errors.Is(err, ErrAdapterNotFound) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("probe BlueZ: %w", err)
 	}
-	adapters, err := c.ListAdapters(ctx)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("init bluetooth client: %w", err)
-	}
-	if len(adapters) > 0 {
-		c.SetActiveAdapter(adapters[0].Path)
-	}
 	return c, nil
+}
+
+// snapshot fetches the BlueZ object tree and resolves the active adapter in
+// it. The adapter path is "" when BlueZ has no adapters.
+func (c *Client) snapshot(ctx context.Context) (managedObjects, dbus.ObjectPath, error) {
+	objects, err := c.getManagedObjects(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	path, err := c.resolveAdapter(objects)
+	if err != nil {
+		return objects, "", err
+	}
+	return objects, path, nil
+}
+
+// resolveAdapter picks the active adapter from objects: the preferred one when
+// it exists, otherwise the first adapter (unless the preference is strict).
+func (c *Client) resolveAdapter(objects managedObjects) (dbus.ObjectPath, error) {
+	adapters := adaptersIn(objects)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var chosen dbus.ObjectPath
+	if c.adapterName != "" {
+		for _, a := range adapters {
+			if a.Name == c.adapterName {
+				chosen = a.Path
+				break
+			}
+		}
+		if chosen == "" && c.strictAdapter {
+			c.activeAdapter = ""
+			return "", fmt.Errorf("%w: %s", ErrAdapterNotFound, c.adapterName)
+		}
+	}
+	if chosen == "" && len(adapters) > 0 {
+		chosen = adapters[0].Path
+	}
+	c.activeAdapter = chosen
+	return chosen, nil
 }
 
 // Verbose reports whether the client logs D-Bus calls to stderr.
@@ -169,12 +226,10 @@ func deviceLabelFromPath(path dbus.ObjectPath) string {
 // under the active adapter path. Scanned-but-unpaired and cached strangers are
 // excluded. Connected and Trusted are not filter conditions.
 func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
-	objects, err := c.getManagedObjects(ctx)
+	objects, adapterPath, err := c.snapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
-
-	adapterPath := c.ActiveAdapter()
 	if adapterPath == "" {
 		return []Device{}, nil
 	}
@@ -258,20 +313,12 @@ func (c *Client) getManagedObjects(ctx context.Context) (managedObjects, error) 
 // findAdapterPath returns the active adapter path together with a
 // GetManagedObjects snapshot.
 func (c *Client) findAdapterPath(ctx context.Context) (dbus.ObjectPath, managedObjects, error) {
-	objects, err := c.getManagedObjects(ctx)
+	objects, path, err := c.snapshot(ctx)
 	if err != nil {
 		return "", nil, err
 	}
-	path := c.ActiveAdapter()
 	if path == "" {
 		return "", objects, fmt.Errorf("find adapter: %w", ErrNoAdapter)
-	}
-	ifaces, ok := objects[path]
-	if !ok {
-		return "", objects, fmt.Errorf("find adapter %s: %w", path, ErrAdapterNotReady)
-	}
-	if _, ok := ifaces[bluezAdapterIface]; !ok {
-		return "", objects, fmt.Errorf("find adapter %s: missing %s", path, bluezAdapterIface)
 	}
 	return path, objects, nil
 }

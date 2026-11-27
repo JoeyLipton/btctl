@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/joeylipton/btctl/bluetooth"
+	"github.com/joeylipton/btctl/internal/state"
 )
 
 func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (int, error) {
@@ -104,12 +105,15 @@ func runAdapterSelect(ctx context.Context, client *bluetooth.Client, name string
 	}
 	for _, a := range adapters {
 		if a.Name == name {
-			client.SetActiveAdapter(a.Path)
+			client.SelectAdapter(a)
+			if err := state.SaveAdapter(a.Name); err != nil {
+				return exitError, fmt.Errorf("adapter select: %w", err)
+			}
 			fmt.Printf("active adapter set to %s (%s)\n", a.Name, a.Address)
 			return exitSuccess, nil
 		}
 	}
-	return exitError, fmt.Errorf("adapter select %s: %w", name, bluetooth.ErrAdapterNotReady)
+	return exitError, fmt.Errorf("adapter select: %w: %s", bluetooth.ErrAdapterNotFound, name)
 }
 
 func yesNo(b bool) string {

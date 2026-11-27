@@ -23,7 +23,7 @@ func connectTestClient(t *testing.T) *Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := New(ctx, false)
+	client, err := New(ctx, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

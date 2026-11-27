@@ -56,11 +56,11 @@ func trustedLabel(trusted bool) string {
 
 // runStatus owns its own client lifecycle so it never emits anything on
 // stderr in normal (non-verbose) mode. It always exits 0.
-func runStatus(verbose bool) (int, error) {
+func runStatus(copts bluetooth.Options) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bluetooth.StatusClientTimeout())
 	defer cancel()
 
-	client, err := bluetooth.New(ctx, verbose)
+	client, err := bluetooth.New(ctx, copts)
 	if err != nil {
 		fmt.Println("[BT] off")
 		return exitSuccess, nil
