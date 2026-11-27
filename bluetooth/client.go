@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -26,6 +27,31 @@ type Client struct {
 	mu              sync.Mutex // guards activeAdapter and connectionLocks
 	activeAdapter   dbus.ObjectPath
 	connectionLocks map[dbus.ObjectPath]*sync.Mutex
+	timeouts        timeouts
+}
+
+// timeouts groups every deadline the client applies. They live on the Client
+// (initialised from the package constants) so tests can shorten them.
+type timeouts struct {
+	call             time.Duration // ordinary D-Bus method calls
+	connect          time.Duration // Device1.Connect, which blocks until the link is up
+	pair             time.Duration // Device1.Pair, which blocks while the agent is consulted
+	connection       time.Duration // the whole connect-and-bond wait
+	bonding          time.Duration // Bonded/Paired after Connected for new devices
+	servicesResolved time.Duration
+	disconnect       time.Duration
+}
+
+func defaultTimeouts() timeouts {
+	return timeouts{
+		call:             dbusCallTimeout,
+		connect:          connectCallTimeout,
+		pair:             pairCallTimeout,
+		connection:       pairingTimeout,
+		bonding:          bondingTimeout,
+		servicesResolved: servicesResolvedTimeout,
+		disconnect:       disconnectTimeout,
+	}
 }
 
 // Device is a snapshot of a remote Bluetooth device exposed by BlueZ.
@@ -53,7 +79,7 @@ func New(ctx context.Context, verbose bool) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect system D-Bus: %w", err)
 	}
-	c := &Client{conn: conn, verbose: verbose}
+	c := &Client{conn: conn, verbose: verbose, timeouts: defaultTimeouts()}
 	if err := c.callCtx(ctx, bluezRootPath, dbusObjectManagerIface, "GetManagedObjects"); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("probe BlueZ: %w", err)
@@ -188,6 +214,15 @@ func (c *Client) callCtx(ctx context.Context, path dbus.ObjectPath, iface, metho
 
 // callCtxStore is the result-aware variant of callCtx.
 func (c *Client) callCtxStore(ctx context.Context, path dbus.ObjectPath, iface, method string, dest interface{}, args ...interface{}) error {
+	if c == nil {
+		return fmt.Errorf("dbus call: bluetooth client is not connected")
+	}
+	return c.callTimeout(ctx, c.timeouts.call, path, iface, method, dest, args...)
+}
+
+// callTimeout is callCtxStore with an explicit timeout, for methods such as
+// Device1.Connect and Device1.Pair that legitimately block for a long time.
+func (c *Client) callTimeout(ctx context.Context, timeout time.Duration, path dbus.ObjectPath, iface, method string, dest interface{}, args ...interface{}) error {
 	if c == nil || c.conn == nil {
 		return fmt.Errorf("dbus call: bluetooth client is not connected")
 	}
@@ -195,7 +230,7 @@ func (c *Client) callCtxStore(ctx context.Context, path dbus.ObjectPath, iface, 
 		fmt.Fprintf(os.Stderr, "[v] call: %s.%s on %s\n", iface, method, path)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, dbusCallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	obj := c.conn.Object(bluezService, path)

@@ -85,7 +85,7 @@ func (m *Menu) connectWithAgent(parentCtx context.Context, device Device, wasAlr
 	name := devicePresentName(device)
 	addr := device.Address
 
-	ctx, cancel := context.WithTimeout(parentCtx, pairingTimeout)
+	ctx, cancel := context.WithTimeout(parentCtx, m.client.timeouts.connection)
 	var wg sync.WaitGroup
 	// cancel must run before wg.Wait to unblock goroutines waiting on
 	// ctx.Done. Defers run LIFO so cancel() is written after wg.Wait().

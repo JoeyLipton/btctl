@@ -30,7 +30,7 @@ func (c *Client) getProperty(ctx context.Context, path dbus.ObjectPath, iface, p
 	if c == nil || c.conn == nil {
 		return dbus.Variant{}, fmt.Errorf("get property: bluetooth client is not connected")
 	}
-	callCtx, cancel := context.WithTimeout(ctx, dbusCallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, c.timeouts.call)
 	defer cancel()
 	obj := c.conn.Object(bluezService, path)
 	call := obj.CallWithContext(callCtx, dbusPropertiesIface+".Get", 0, iface, property)
@@ -242,7 +242,7 @@ func (c *Client) waitForConnectionComplete(
 
 	fmt.Fprintf(os.Stderr, "%swaiting for bonding to complete...\n", stderrPrefix)
 
-	bondCtx, cancel := context.WithTimeout(ctx, bondingTimeout)
+	bondCtx, cancel := context.WithTimeout(ctx, c.timeouts.bonding)
 	defer cancel()
 
 	bondedDone := make(chan error, 1)

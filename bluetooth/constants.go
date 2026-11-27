@@ -18,6 +18,12 @@ const (
 	// need generous headroom, but it stays below pairingTimeout.
 	pairCallTimeout = 45 * time.Second
 
+	// connectCallTimeout bounds Device1.Connect. BlueZ only replies once the
+	// link and its profiles are up, which routinely takes several seconds for
+	// audio devices (a classic page timeout alone is ~5 s), and BlueZ applies
+	// its own connection timeouts, so this is a generous safety net.
+	connectCallTimeout = 45 * time.Second
+
 	connectedPollInterval = 100 * time.Millisecond
 
 	// disconnectTimeout is how long to wait for Connected: false after

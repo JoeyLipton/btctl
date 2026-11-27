@@ -77,7 +77,7 @@ func (c *Client) PairDevice(ctx context.Context, path dbus.ObjectPath) error {
 		return fmt.Errorf("pair device %s: %w", path, err)
 	}
 
-	svcCtx, svcCancel := context.WithTimeout(ctx, servicesResolvedTimeout)
+	svcCtx, svcCancel := context.WithTimeout(ctx, c.timeouts.servicesResolved)
 	defer svcCancel()
 	if err := c.waitForServicesResolved(svcCtx, path); err != nil {
 		fmt.Fprintf(os.Stderr, "%swarning: ServicesResolved did not resolve: %v\n", stderrPrefix, err)
@@ -86,20 +86,11 @@ func (c *Client) PairDevice(ctx context.Context, path dbus.ObjectPath) error {
 	return nil
 }
 
-// pairDBusCall invokes Device1.Pair with pairCallTimeout.
+// pairDBusCall invokes Device1.Pair with the pair timeout.
 func (c *Client) pairDBusCall(ctx context.Context, path dbus.ObjectPath) error {
-	if c.verbose {
-		fmt.Fprintf(os.Stderr, "[v] call: %s.Pair on %s\n", bluezDeviceIface, path)
-	}
-	pairCtx, cancel := context.WithTimeout(ctx, pairCallTimeout)
-	defer cancel()
-	obj := c.conn.Object(bluezService, path)
-	call := obj.CallWithContext(pairCtx, bluezDeviceIface+".Pair", 0)
-	if call.Err != nil {
-		if isDBusError(call.Err, errNameAlreadyExists) {
-			return nil
-		}
-		return fmt.Errorf("pair device %s: %w", path, call.Err)
+	err := c.callTimeout(ctx, c.timeouts.pair, path, bluezDeviceIface, "Pair", nil)
+	if err != nil && !isDBusError(err, errNameAlreadyExists) {
+		return fmt.Errorf("pair device %s: %w", path, err)
 	}
 	return nil
 }
@@ -129,13 +120,18 @@ func (c *Client) connectDirect(ctx context.Context, path dbus.ObjectPath) error 
 		fmt.Fprintf(os.Stderr, "%swarning: set trusted %s: %v\n", stderrPrefix, path, err)
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, pairingTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, c.timeouts.connection)
 	defer cancel()
 	watchDone := make(chan error, 1)
 	go func() {
 		watchDone <- c.waitForConnectionComplete(waitCtx, path, wasAlreadyBonded)
 	}()
-	if err := c.callCtx(ctx, path, bluezDeviceIface, "Connect"); err != nil {
+	// Device1.Connect blocks until the link is up, so it gets the connect
+	// timeout rather than the short per-call one.
+	err = c.callTimeout(ctx, c.timeouts.connect, path, bluezDeviceIface, "Connect", nil)
+	if err != nil && !isDBusError(err, errNameAlreadyConnected) {
+		cancel()
+		<-watchDone
 		notify(notifyAppName, "Could not connect to "+c.getDeviceName(ctx, path)+": "+FormatUserError(err))
 		return fmt.Errorf("connect device %s: %w", path, err)
 	}
@@ -146,19 +142,11 @@ func (c *Client) connectDirect(ctx context.Context, path dbus.ObjectPath) error 
 	return nil
 }
 
-// connectInteractive fires Device1.Connect without the callCtx cap or
-// Connected polling, for interactive menu pairing flows.
+// connectInteractive fires Device1.Connect without Connected polling, for
+// interactive menu pairing flows.
 func (c *Client) connectInteractive(ctx context.Context, path dbus.ObjectPath) error {
-	if c == nil || c.conn == nil {
-		return fmt.Errorf("connect device: bluetooth client is not connected")
-	}
-	if c.verbose {
-		fmt.Fprintf(os.Stderr, "[v] call: %s.Connect on %s\n", bluezDeviceIface, path)
-	}
-	obj := c.conn.Object(bluezService, path)
-	call := obj.CallWithContext(ctx, bluezDeviceIface+".Connect", 0)
-	if call.Err != nil {
-		return fmt.Errorf("connect device %s: %w", path, call.Err)
+	if err := c.callTimeout(ctx, c.timeouts.connect, path, bluezDeviceIface, "Connect", nil); err != nil {
+		return fmt.Errorf("connect device %s: %w", path, err)
 	}
 	return nil
 }
@@ -170,7 +158,7 @@ func (c *Client) Disconnect(ctx context.Context, path dbus.ObjectPath) error {
 
 	// The watch is bounded by the caller's context too, and is always joined
 	// before returning so no goroutine outlives the call.
-	disconnectCtx, cancel := context.WithTimeout(ctx, disconnectTimeout)
+	disconnectCtx, cancel := context.WithTimeout(ctx, c.timeouts.disconnect)
 	defer cancel()
 	watchDone := make(chan error, 1)
 	go func() {
