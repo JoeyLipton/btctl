@@ -59,32 +59,25 @@ func runStatus(copts bluetooth.Options) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bluetooth.StatusClientTimeout())
 	defer cancel()
 
-	client, err := bluetooth.New(ctx, copts)
+	client, err := bluetooth.New(copts)
 	if err != nil {
 		fmt.Println("[BT] off")
 		return exitSuccess, nil
 	}
 	defer func() { _ = client.Close() }()
 
-	powered, err := client.GetAdapterPowered(ctx)
-	if err != nil || !powered {
-		fmt.Println("[BT] off")
-		return exitSuccess, nil
-	}
-
-	devices, err := client.ListDevices(ctx)
-	if err != nil {
+	state, err := client.State(ctx)
+	if err != nil || !state.Found || !state.Adapter.Powered {
 		fmt.Println("[BT] off")
 		return exitSuccess, nil
 	}
 
 	var connected []bluetooth.Device
-	for _, d := range devices {
+	for _, d := range state.Devices {
 		if d.Connected {
 			connected = append(connected, d)
 		}
 	}
-
 	fmt.Printf("[BT] %d\n", len(connected))
 	for _, d := range connected {
 		fmt.Printf("%s\t%s\n", displayName(d), d.Address)

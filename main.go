@@ -259,7 +259,7 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := bluetooth.New(ctx, clientOptions(opts))
+	client, err := bluetooth.New(clientOptions(opts))
 	if err != nil {
 		return exitError, fmt.Errorf("init bluetooth client: %w", err)
 	}

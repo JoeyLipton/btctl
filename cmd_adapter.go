@@ -67,11 +67,7 @@ func runAdapterStatus(ctx context.Context, client *bluetooth.Client) (int, error
 }
 
 func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
-	path := client.ActiveAdapter()
-	if path == "" {
-		return exitError, fmt.Errorf("adapter power: no active adapter")
-	}
-	if err := client.SetAdapterPowered(ctx, path, on); err != nil {
+	if err := client.SetAdapterPowered(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter power: %w", err)
 	}
 	if on {
@@ -83,11 +79,7 @@ func runAdapterPower(ctx context.Context, client *bluetooth.Client, on bool) (in
 }
 
 func runAdapterDiscoverable(ctx context.Context, client *bluetooth.Client, on bool) (int, error) {
-	path := client.ActiveAdapter()
-	if path == "" {
-		return exitError, fmt.Errorf("adapter discoverable: no active adapter")
-	}
-	if err := client.SetDiscoverable(ctx, path, on); err != nil {
+	if err := client.SetDiscoverable(ctx, on); err != nil {
 		return exitError, fmt.Errorf("adapter discoverable: %w", err)
 	}
 	if on {

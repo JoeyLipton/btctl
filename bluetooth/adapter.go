@@ -95,17 +95,12 @@ func (c *Client) ActiveAdapterInfo(ctx context.Context) (Adapter, error) {
 	return parseAdapter(path, objects[path][bluezAdapterIface]), nil
 }
 
-// GetAdapterPowered reports whether the active adapter is powered.
-func (c *Client) GetAdapterPowered(ctx context.Context) (bool, error) {
-	a, err := c.ActiveAdapterInfo(ctx)
+// SetAdapterPowered powers the active adapter on or off.
+func (c *Client) SetAdapterPowered(ctx context.Context, powered bool) error {
+	path, _, err := c.findAdapterPath(ctx)
 	if err != nil {
-		return false, fmt.Errorf("get adapter powered: %w", err)
+		return fmt.Errorf("set adapter powered: %w", err)
 	}
-	return a.Powered, nil
-}
-
-// SetAdapterPowered sets the Powered property on org.bluez.Adapter1 at path.
-func (c *Client) SetAdapterPowered(ctx context.Context, path dbus.ObjectPath, powered bool) error {
 	return c.setAdapterPowered(ctx, path, powered, false)
 }
 
@@ -126,8 +121,13 @@ func (c *Client) setAdapterPowered(ctx context.Context, path dbus.ObjectPath, po
 	return c.setAdapterPowered(ctx, path, powered, true)
 }
 
-// SetDiscoverable sets the Discoverable property on org.bluez.Adapter1 at path.
-func (c *Client) SetDiscoverable(ctx context.Context, path dbus.ObjectPath, on bool) error {
+// SetDiscoverable makes the active adapter visible to other devices (with no
+// timeout) or hides it again.
+func (c *Client) SetDiscoverable(ctx context.Context, on bool) error {
+	path, _, err := c.findAdapterPath(ctx)
+	if err != nil {
+		return fmt.Errorf("set discoverable: %w", err)
+	}
 	if err := c.setAdapterProperty(ctx, path, propAdapterDiscoverable, on); err != nil {
 		return fmt.Errorf("set discoverable %s: %w", path, err)
 	}
@@ -163,8 +163,8 @@ func (c *Client) waitForAdapterPowered(ctx context.Context) error {
 	deadline := time.Now().Add(rfkillRecoveryTimeout)
 	var lastErr error
 	for {
-		powered, err := c.GetAdapterPowered(ctx)
-		if err == nil && powered {
+		a, err := c.ActiveAdapterInfo(ctx)
+		if err == nil && a.Powered {
 			return nil
 		}
 		if err != nil {

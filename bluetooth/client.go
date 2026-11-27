@@ -6,7 +6,6 @@ package bluetooth
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -84,33 +83,53 @@ type Device struct {
 	Battery   int   // charge percentage 0-100; batteryUnavailable (-1) if absent
 }
 
-// New opens a private connection to the system bus, verifies that org.bluez
-// is reachable and resolves the active adapter (see Options).
+// New opens a private connection to the system bus. It makes no BlueZ calls:
+// every operation fetches what it needs, and the active adapter (see Options)
+// is resolved from each object snapshot, so the first operation reports
+// "BlueZ is not running" or a missing -a adapter.
 //
 // The connection is private (not godbus's shared SystemBus) because Close
 // tears it down; closing the shared connection would break any other user of
 // it in the same process. DBUS_SYSTEM_BUS_ADDRESS is honoured, which is how the
 // tests point the client at a fake bluetoothd.
-func New(ctx context.Context, opts Options) (*Client, error) {
+func New(opts Options) (*Client, error) {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connect system D-Bus: %w", err)
 	}
-	c := &Client{
+	return &Client{
 		conn:          conn,
 		verbose:       opts.Verbose,
 		timeouts:      defaultTimeouts(),
 		adapterName:   opts.Adapter,
 		strictAdapter: opts.Adapter != "" && !opts.AdapterOptional,
+	}, nil
+}
+
+// AdapterState is the active adapter and its paired devices.
+type AdapterState struct {
+	Adapter Adapter  // the active adapter; zero when Found is false
+	Found   bool     // whether BlueZ has an adapter at all
+	Devices []Device // paired devices, connected first (see ListDevices)
+}
+
+// State returns the active adapter and its paired devices from a single
+// GetManagedObjects call. Status bars poll `btctl status` every few seconds,
+// and every call returns all objects BlueZ knows (often hundreds of cached
+// BLE devices), so status reads everything at once.
+func (c *Client) State(ctx context.Context) (AdapterState, error) {
+	objects, adapterPath, err := c.snapshot(ctx)
+	if err != nil {
+		return AdapterState{}, fmt.Errorf("read state: %w", err)
 	}
-	if _, _, err := c.snapshot(ctx); err != nil {
-		_ = conn.Close()
-		if errors.Is(err, ErrAdapterNotFound) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("probe BlueZ: %w", err)
+	if adapterPath == "" {
+		return AdapterState{}, nil
 	}
-	return c, nil
+	return AdapterState{
+		Adapter: parseAdapter(adapterPath, objects[adapterPath][bluezAdapterIface]),
+		Found:   true,
+		Devices: pairedDevices(objects, adapterPath),
+	}, nil
 }
 
 // snapshot fetches the BlueZ object tree and resolves the active adapter in
@@ -229,6 +248,12 @@ func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
+	return pairedDevices(objects, adapterPath), nil
+}
+
+// pairedDevices returns the paired devices under adapterPath, connected
+// first, then alphabetically by name.
+func pairedDevices(objects managedObjects, adapterPath dbus.ObjectPath) []Device {
 	devices := make([]Device, 0)
 	for _, d := range devicesIn(objects, adapterPath) {
 		if d.Paired {
@@ -241,7 +266,7 @@ func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
 		}
 		return strings.ToLower(devices[i].Name) < strings.ToLower(devices[j].Name)
 	})
-	return devices, nil
+	return devices
 }
 
 // FindDevice returns the device with the given address (case-insensitive)

@@ -21,9 +21,7 @@ func newTestClient(t *testing.T) (*fakebluez.BlueZ, *Client) {
 // fakebluez.New. Use it after adding adapters to the fake.
 func connectTestClient(t *testing.T) *Client {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := New(ctx, Options{})
+	client, err := New(Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

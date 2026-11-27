@@ -1,10 +1,8 @@
 package bluetooth
 
 import (
-	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/joeylipton/btctl/internal/fakebluez"
 )
@@ -20,15 +18,19 @@ func twoAdapterFake(t *testing.T) *fakebluez.BlueZ {
 	return fake
 }
 
+// newClientWith connects a client with opts and performs a first BlueZ call,
+// which is where adapter selection is resolved (and can fail).
 func newClientWith(t *testing.T, opts Options) (*Client, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := New(ctx, opts)
-	if err == nil {
-		t.Cleanup(func() { _ = client.Close() })
+	client, err := New(opts)
+	if err != nil {
+		return nil, err
 	}
-	return client, err
+	t.Cleanup(func() { _ = client.Close() })
+	if _, err := client.ListAdapters(testContext(t)); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func deviceNames(t *testing.T, client *Client) []string {

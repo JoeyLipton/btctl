@@ -118,12 +118,7 @@ func (m *Menu) menuAdapterStatus(ctx context.Context) error {
 }
 
 func (m *Menu) menuAdapterSetPowered(ctx context.Context, on bool) {
-	path := m.client.ActiveAdapter()
-	if path == "" {
-		tell("No Bluetooth adapter found")
-		return
-	}
-	if err := m.client.SetAdapterPowered(ctx, path, on); err != nil {
+	if err := m.client.SetAdapterPowered(ctx, on); err != nil {
 		tell("Could not change adapter power: %s", FormatUserError(err))
 		return
 	}
@@ -135,12 +130,7 @@ func (m *Menu) menuAdapterSetPowered(ctx context.Context, on bool) {
 }
 
 func (m *Menu) menuAdapterSetDiscoverable(ctx context.Context, on bool) {
-	path := m.client.ActiveAdapter()
-	if path == "" {
-		tell("No Bluetooth adapter found")
-		return
-	}
-	if err := m.client.SetDiscoverable(ctx, path, on); err != nil {
+	if err := m.client.SetDiscoverable(ctx, on); err != nil {
 		tell("Could not change discoverable mode: %s", FormatUserError(err))
 		return
 	}
