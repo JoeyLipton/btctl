@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/bluetooth"
 
 	"github.com/godbus/dbus/v5"
 )

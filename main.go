@@ -7,7 +7,7 @@ import (
 	"os"
 	"regexp"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/bluetooth"
 )
 
 // Exit codes used by btctl.

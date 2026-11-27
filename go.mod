@@ -1,4 +1,4 @@
-module btctl
+module github.com/joeylipton/btctl
 
 go 1.21
 

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/bluetooth"
 )
 
 // pickUsageLine is reused by every parsePickArgs error path so the usage hint

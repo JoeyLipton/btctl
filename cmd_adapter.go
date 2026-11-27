@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"btctl/bluetooth"
+	"github.com/joeylipton/btctl/bluetooth"
 )
 
 func runAdapter(ctx context.Context, client *bluetooth.Client, args []string) (int, error) {
