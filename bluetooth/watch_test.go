@@ -81,8 +81,8 @@ func TestPairDeviceFailureStopsWatching(t *testing.T) {
 	path := fake.AddDevice(fakebluez.Device{Address: "AA:AA:AA:AA:AA:01", Battery: -1})
 	fake.SetBehavior(path, fakebluez.Behavior{PairErr: dbus.NewError(errNameAuthFailed, []any{"Authentication Failed"})})
 
-	if err := client.PairDevice(testContext(t), path); !isDBusError(err, errNameAuthFailed) {
-		t.Fatalf("PairDevice = %v, want AuthenticationFailed", err)
+	if err := client.Pair(testContext(t), path); !isDBusError(err, errNameAuthFailed) {
+		t.Fatalf("Pair = %v, want AuthenticationFailed", err)
 	}
 	fake.ResetCalls()
 	time.Sleep(1500 * time.Millisecond)

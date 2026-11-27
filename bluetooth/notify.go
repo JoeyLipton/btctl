@@ -71,6 +71,10 @@ func resolveNotifyState() *notifyResolver {
 	return r
 }
 
+// Notify shows a desktop notification from btctl without waiting for it.
+// It is a no-op when notify-send is not installed.
+func Notify(body string) { notify(notifyAppName, body) }
+
 // notify sends a desktop status notification without waiting for it to be
 // shown. It is a no-op when notify-send is not installed.
 func notify(title, body string) {

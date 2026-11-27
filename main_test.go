@@ -30,8 +30,23 @@ var outputMu sync.Mutex
 // text it wrote to stdout and stderr.
 func runCLI(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	return runCLIInput(t, "", args...)
+}
+
+// runCLIInput is runCLI with input fed to stdin.
+func runCLIInput(t *testing.T, input string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
 	outputMu.Lock()
 	defer outputMu.Unlock()
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = io.WriteString(inW, input); _ = inW.Close() }()
+	origIn := os.Stdin
+	os.Stdin = inR
+	defer func() { os.Stdin = origIn; _ = inR.Close() }()
 
 	capture := func(target **os.File) (restore func() string) {
 		r, w, err := os.Pipe()

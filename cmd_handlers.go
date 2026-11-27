@@ -12,8 +12,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/godbus/dbus/v5"
-
 	"github.com/joeylipton/btctl/bluetooth"
 	"github.com/joeylipton/btctl/internal/textfmt"
 )
@@ -121,99 +119,115 @@ func runScan(ctx context.Context, client *bluetooth.Client, seconds int) (int, e
 	return selectScanDevice(ctx, client, devices)
 }
 
+// lookupDevice finds a device BlueZ knows on the active adapter by address.
+func lookupDevice(ctx context.Context, client *bluetooth.Client, address string) (bluetooth.Device, error) {
+	d, err := client.FindDevice(ctx, address)
+	if errors.Is(err, bluetooth.ErrDeviceNotFound) {
+		return d, fmt.Errorf("%w: %s (see btctl list, or btctl scan to find new devices)", bluetooth.ErrDeviceNotFound, address)
+	}
+	return d, err
+}
+
 func runConnect(ctx context.Context, client *bluetooth.Client, address string) (int, error) {
-	path, err := resolveAddress(ctx, client, address)
+	dev, err := lookupDevice(ctx, client, address)
 	if err != nil {
 		return exitError, err
 	}
-	name := connectDisplayName(ctx, client, path, address)
-	fmt.Fprintf(os.Stderr, "[btctl] connecting to %s (%s)...\n", name, address)
-	if err := client.Connect(ctx, path); err != nil {
-		if errors.Is(err, bluetooth.ErrConnectInProgress) {
-			fmt.Fprintf(os.Stderr, "[btctl] already connecting to %s\n", address)
-			return exitSuccess, nil
+	if dev.Connected {
+		fmt.Printf("%s (%s) is already connected\n", displayName(dev), dev.Address)
+		return exitSuccess, nil
+	}
+	return connectAndReport(ctx, client, dev)
+}
+
+// connectAndReport pairs (when needed) and connects dev. Progress goes to
+// stderr, the result to stdout and a desktop notification (btctl is often
+// run from a keybinding).
+func connectAndReport(ctx context.Context, client *bluetooth.Client, dev bluetooth.Device) (int, error) {
+	name := displayName(dev)
+	result, err := client.Connect(ctx, dev.Path, func(stage bluetooth.ConnectStage) {
+		switch stage {
+		case bluetooth.StagePairing:
+			fmt.Fprintf(os.Stderr, "[btctl] pairing with %s (%s)...\n", name, dev.Address)
+		case bluetooth.StageConnecting:
+			fmt.Fprintf(os.Stderr, "[btctl] connecting to %s (%s)...\n", name, dev.Address)
 		}
+	})
+	if err != nil {
+		bluetooth.Notify("Could not connect to " + name + ": " + bluetooth.FormatUserError(err))
 		return exitError, err
 	}
-	fmt.Fprintf(os.Stderr, "[btctl] connected to %s (%s)\n", name, address)
+	msg := "Connected to " + name
+	if result.BondingPending {
+		msg += " (bonding may still be completing)"
+	}
+	fmt.Printf("%s (%s)\n", msg, dev.Address)
+	bluetooth.Notify(msg)
 	return exitSuccess, nil
 }
 
-func connectDisplayName(ctx context.Context, client *bluetooth.Client, path dbus.ObjectPath, address string) string {
-	devices, err := client.ListDevices(ctx)
+func runPair(ctx context.Context, client *bluetooth.Client, address string) (int, error) {
+	dev, err := lookupDevice(ctx, client, address)
 	if err != nil {
-		return address
+		return exitError, err
 	}
-	for _, d := range devices {
-		if d.Path == path {
-			return displayName(d)
-		}
+	name := displayName(dev)
+	if dev.Paired {
+		fmt.Printf("%s (%s) is already paired\n", name, dev.Address)
+		return exitSuccess, nil
 	}
-	return address
+	fmt.Fprintf(os.Stderr, "[btctl] pairing with %s (%s)...\n", name, dev.Address)
+	if err := client.Pair(ctx, dev.Path); err != nil {
+		bluetooth.Notify("Could not pair with " + name + ": " + bluetooth.FormatUserError(err))
+		return exitError, err
+	}
+	fmt.Printf("Paired with %s (%s)\n", name, dev.Address)
+	bluetooth.Notify("Paired with " + name)
+	return exitSuccess, nil
 }
 
 func runDisconnect(ctx context.Context, client *bluetooth.Client, address string) (int, error) {
-	path, err := resolveAddress(ctx, client, address)
+	dev, err := lookupDevice(ctx, client, address)
 	if err != nil {
 		return exitError, err
 	}
-	if err := client.Disconnect(ctx, path); err != nil {
+	if !dev.Connected {
+		fmt.Printf("%s (%s) is not connected\n", displayName(dev), dev.Address)
+		return exitSuccess, nil
+	}
+	if err := client.Disconnect(ctx, dev.Path); err != nil {
 		return exitError, err
 	}
+	fmt.Printf("Disconnected from %s (%s)\n", displayName(dev), dev.Address)
+	bluetooth.Notify("Disconnected from " + displayName(dev))
 	return exitSuccess, nil
 }
 
 func runForget(ctx context.Context, client *bluetooth.Client, address string) (int, error) {
-	devices, err := client.ListDevices(ctx)
+	dev, err := lookupDevice(ctx, client, address)
 	if err != nil {
-		return exitError, fmt.Errorf("forget: %w", err)
-	}
-	needle := strings.ToLower(address)
-	var target *bluetooth.Device
-	for i := range devices {
-		if strings.ToLower(devices[i].Address) == needle {
-			target = &devices[i]
-			break
-		}
-	}
-	if target == nil {
-		return exitError, fmt.Errorf("forget device %s: %w", address, bluetooth.ErrDeviceNotFound)
-	}
-	if err := client.ForgetDevice(ctx, target.Path); err != nil {
 		return exitError, err
 	}
-	name := target.Name
-	if name == "" {
-		name = address
+	if err := client.ForgetDevice(ctx, dev.Path); err != nil {
+		return exitError, err
 	}
-	fmt.Printf("Forgot %s (%s)\n", name, address)
+	fmt.Printf("Forgot %s (%s)\n", displayName(dev), dev.Address)
+	bluetooth.Notify("Removed " + displayName(dev))
 	return exitSuccess, nil
 }
 
 func runTrust(ctx context.Context, client *bluetooth.Client, address string, trust bool) (int, error) {
-	devices, err := client.ListDevices(ctx)
+	dev, err := lookupDevice(ctx, client, address)
 	if err != nil {
-		return exitError, fmt.Errorf("trust: %w", err)
-	}
-	needle := strings.ToLower(address)
-	var target *bluetooth.Device
-	for i := range devices {
-		if strings.ToLower(devices[i].Address) == needle {
-			target = &devices[i]
-			break
-		}
-	}
-	if target == nil {
-		return exitError, fmt.Errorf("trust device %s: %w", address, bluetooth.ErrDeviceNotFound)
-	}
-	if err := client.SetTrusted(ctx, target.Path, trust); err != nil {
 		return exitError, err
 	}
-	name := displayName(*target)
+	if err := client.SetTrusted(ctx, dev.Path, trust); err != nil {
+		return exitError, err
+	}
 	if trust {
-		fmt.Printf("Trusted: %s (%s)\n", name, address)
+		fmt.Printf("Trusted: %s (%s)\n", displayName(dev), dev.Address)
 	} else {
-		fmt.Printf("Untrusted: %s (%s)\n", name, address)
+		fmt.Printf("Untrusted: %s (%s)\n", displayName(dev), dev.Address)
 	}
 	return exitSuccess, nil
 }
@@ -253,26 +267,7 @@ func selectScanDevice(ctx context.Context, client *bluetooth.Client, devices []b
 		return exitError, nil
 	}
 
-	target := devices[n-1]
-	if err := client.Connect(ctx, target.Path); err != nil {
-		return exitError, err
-	}
-	fmt.Printf("Connected to %s (%s)\n", displayName(target), target.Address)
-	return exitSuccess, nil
-}
-
-func resolveAddress(ctx context.Context, client *bluetooth.Client, address string) (dbus.ObjectPath, error) {
-	devices, err := client.ListDevices(ctx)
-	if err != nil {
-		return "", fmt.Errorf("looking up %q: %w", address, err)
-	}
-	needle := strings.ToLower(address)
-	for _, d := range devices {
-		if strings.ToLower(d.Address) == needle {
-			return d.Path, nil
-		}
-	}
-	return "", fmt.Errorf("lookup device %s: %w", address, bluetooth.ErrDeviceNotFound)
+	return connectAndReport(ctx, client, devices[n-1])
 }
 
 func deviceStatus(d bluetooth.Device) string {

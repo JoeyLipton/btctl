@@ -49,7 +49,7 @@ func parseCommandFlags(args []string) (parsedCommand, int, error) {
 		if target != "" {
 			parsed.adapterArgs = append(parsed.adapterArgs, target)
 		}
-	case "connect", "disconnect", "forget", "trust", "untrust":
+	case "connect", "pair", "disconnect", "forget", "trust", "untrust":
 		if len(args) != 2 {
 			return parsed, exitUsage, errBadUsage
 		}

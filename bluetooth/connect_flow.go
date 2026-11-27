@@ -6,6 +6,7 @@ package bluetooth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -13,32 +14,26 @@ import (
 // connectWithConfirmation pairs (when needed) and connects device, reporting
 // the outcome to the user. Failures are reported, not returned: they must not
 // end the menu session.
-func (m *Menu) connectWithConfirmation(parentCtx context.Context, device Device) error {
-	mu := m.client.connLock(device.Path)
-	if !mu.TryLock() {
-		tell("Already connecting to %s", devicePresentName(device))
-		return nil
-	}
-	defer mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(parentCtx, m.client.timeouts.connection)
-	defer cancel()
-
+func (m *Menu) connectWithConfirmation(ctx context.Context, device Device) error {
 	name := devicePresentName(device)
-	if !device.Paired {
-		menuStderr("pairing with %s (%s)...", name, device.Address)
-		if err := m.client.PairDevice(ctx, device.Path); err != nil {
-			menuStderr("error: %s", err)
-			notify(notifyAppName, "Could not pair with "+name+": "+FormatUserError(err))
-			return nil
+	result, err := m.client.Connect(ctx, device.Path, func(stage ConnectStage) {
+		switch stage {
+		case StagePairing:
+			menuStderr("pairing with %s (%s)...", name, device.Address)
+		case StageConnecting:
+			menuStderr("connecting to %s (%s)...", name, device.Address)
 		}
+	})
+	switch {
+	case errors.Is(err, ErrConnectInProgress):
+		tell("Already connecting to %s", name)
+	case err != nil:
+		tell("Could not connect to %s: %s", name, FormatUserError(err))
+	case result.BondingPending:
+		tell("Connected to %s (bonding may still be completing)", name)
+	default:
+		tell("Connected to %s", name)
 	}
-	menuStderr("connecting to %s (%s)...", name, device.Address)
-	if err := m.client.connectDirect(ctx, device.Path); err != nil {
-		menuStderr("error: %s", err) // connectDirect already notified
-		return nil
-	}
-	menuStderr("connected to %s (%s)", name, device.Address)
 	return nil
 }
 

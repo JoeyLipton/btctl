@@ -42,7 +42,9 @@ Global options:
 
 Commands:
   list                  List all known paired/trusted devices
-  connect    <address>  Connect to a device by MAC address
+  connect    <address>  Connect to a device by MAC address (pairs it first
+                        if needed; the device must have been seen by a scan)
+  pair       <address>  Pair with and trust a device without connecting
   disconnect <address>  Disconnect from a device by MAC address
   trust      <address>  Mark a device as trusted (auto-reconnects after reboot)
   untrust    <address>  Remove trust from a device
@@ -78,6 +80,7 @@ Options for scan:
 Examples:
   btctl list
   btctl connect AA:BB:CC:DD:EE:FF
+  btctl pair AA:BB:CC:DD:EE:FF
   btctl trust AA:BB:CC:DD:EE:FF
   btctl scan -t 20
   btctl status
@@ -290,7 +293,7 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 // therefore needs a pairing agent.
 func commandCanPair(name string) bool {
 	switch name {
-	case "connect", "scan", "pick":
+	case "connect", "pair", "scan", "pick":
 		return true
 	}
 	return false
@@ -325,6 +328,8 @@ func executeCommand(ctx context.Context, client *bluetooth.Client, menu *bluetoo
 		return runScan(ctx, client, parsed.scanSeconds)
 	case "connect":
 		return runConnect(ctx, client, parsed.address)
+	case "pair":
+		return runPair(ctx, client, parsed.address)
 	case "disconnect":
 		return runDisconnect(ctx, client, parsed.address)
 	case "forget":

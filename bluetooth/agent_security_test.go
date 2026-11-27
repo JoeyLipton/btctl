@@ -74,8 +74,8 @@ func TestPairingAuthorisesOnlyTheTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.UnregisterAgent(context.Background(), agent) })
 
-	if err := client.PairDevice(testContext(t), target); err != nil {
-		t.Fatalf("PairDevice: %v", err)
+	if err := client.Pair(testContext(t), target); err != nil {
+		t.Fatalf("Pair: %v", err)
 	}
 	if err, _ := strangerErr.Load().(error); !isDBusError(err, errNameRejected) {
 		t.Errorf("stranger during pairing = %v, want Rejected", err)

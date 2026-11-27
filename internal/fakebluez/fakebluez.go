@@ -554,8 +554,10 @@ func (h *deviceHandler) Pair() *dbus.Error {
 	if err := h.runAgentRequest(bh); err != nil {
 		return err
 	}
+	// Like bluetoothd: pairing opens a link, over which services are resolved.
 	h.b.SetProperty(h.path, DeviceIface, "Bonded", true)
 	h.b.SetProperty(h.path, DeviceIface, "Paired", true)
+	h.b.SetProperty(h.path, DeviceIface, "ServicesResolved", true)
 	return nil
 }
 

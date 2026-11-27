@@ -222,45 +222,60 @@ func deviceLabelFromPath(path dbus.ObjectPath) string {
 
 // ListDevices returns paired devices on the active adapter, sorted with
 // connected devices first and ties broken alphabetically by name.
-//
-// A device is included only when Paired is true and its object path is rooted
-// under the active adapter path. Scanned-but-unpaired and cached strangers are
-// excluded. Connected and Trusted are not filter conditions.
+// Scanned-but-unpaired and cached strangers are excluded; Connected and
+// Trusted are not filter conditions.
 func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
 	objects, adapterPath, err := c.snapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
-	if adapterPath == "" {
-		return []Device{}, nil
-	}
-	// The trailing slash keeps hci1 from matching /org/bluez/hci10/....
-	adapterPrefix := string(adapterPath) + "/"
-
 	devices := make([]Device, 0)
-	for path, ifaces := range objects {
-		props, ok := ifaces[bluezDeviceIface]
-		if !ok {
-			continue
+	for _, d := range devicesIn(objects, adapterPath) {
+		if d.Paired {
+			devices = append(devices, d)
 		}
-		if !strings.HasPrefix(string(path), adapterPrefix) {
-			continue
-		}
-		d := parseDevice(path, props, ifaces)
-		if !d.Paired {
-			continue
-		}
-		devices = append(devices, d)
 	}
-
 	sort.Slice(devices, func(i, j int) bool {
 		if devices[i].Connected != devices[j].Connected {
 			return devices[i].Connected
 		}
 		return strings.ToLower(devices[i].Name) < strings.ToLower(devices[j].Name)
 	})
-
 	return devices, nil
+}
+
+// FindDevice returns the device with the given address (case-insensitive)
+// on the active adapter, whether it is paired or only known to BlueZ, for
+// example from a recent scan.
+func (c *Client) FindDevice(ctx context.Context, address string) (Device, error) {
+	objects, adapterPath, err := c.snapshot(ctx)
+	if err != nil {
+		return Device{}, fmt.Errorf("find device %s: %w", address, err)
+	}
+	for _, d := range devicesIn(objects, adapterPath) {
+		if strings.EqualFold(d.Address, address) {
+			return d, nil
+		}
+	}
+	return Device{}, fmt.Errorf("%w: %s", ErrDeviceNotFound, address)
+}
+
+// devicesIn returns every device under adapterPath in an object snapshot.
+func devicesIn(objects managedObjects, adapterPath dbus.ObjectPath) []Device {
+	if adapterPath == "" {
+		return nil
+	}
+	// The trailing slash keeps hci1 from matching /org/bluez/hci10/....
+	prefix := string(adapterPath) + "/"
+	var devices []Device
+	for path, ifaces := range objects {
+		props, ok := ifaces[bluezDeviceIface]
+		if !ok || !strings.HasPrefix(string(path), prefix) {
+			continue
+		}
+		devices = append(devices, parseDevice(path, props, ifaces))
+	}
+	return devices
 }
 
 // callCtx invokes a method on the BlueZ service at path and waits

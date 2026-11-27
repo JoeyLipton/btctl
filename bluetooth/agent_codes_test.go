@@ -100,8 +100,8 @@ func TestMenuPasskeyEntryPairsDevice(t *testing.T) {
 	menu := NewMenu(client, PickerConfig{Backend: BackendRofi})
 	registerTestAgent(t, client, menu.PairingHandler())
 
-	if err := client.PairDevice(testContext(t), path); err != nil {
-		t.Fatalf("PairDevice: %v", err)
+	if err := client.Pair(testContext(t), path); err != nil {
+		t.Fatalf("Pair: %v", err)
 	}
 	if !strings.Contains(shown(), "Enter the passkey shown on Keyboard") {
 		t.Errorf("picker did not ask for the passkey:\n%s", shown())

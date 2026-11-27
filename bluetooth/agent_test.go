@@ -123,8 +123,8 @@ func TestPairDeviceConsultsAgent(t *testing.T) {
 		return true
 	}))
 
-	if err := client.PairDevice(testContext(t), path); err != nil {
-		t.Fatalf("PairDevice: %v", err)
+	if err := client.Pair(testContext(t), path); err != nil {
+		t.Fatalf("Pair: %v", err)
 	}
 	if seen.Load() != 4242 {
 		t.Errorf("handler saw passkey %d, want 4242", seen.Load())

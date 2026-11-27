@@ -170,34 +170,31 @@ func propertyAbsent(err error) bool {
 	return isDBusError(err, errNameInvalidArgs, errNameUnknownProperty)
 }
 
-// waitForConnectionComplete waits until the BLE connection is fully established.
-// Already-bonded devices need only Connected: true. New devices need Connected,
-// then Bonded and Paired within bondingTimeout after Connected is seen.
+// waitForConnectionComplete waits until the connection is fully established.
+// Already-bonded devices need only Connected: true. New devices need
+// Connected, then Bonded and Paired within the bonding timeout; when bonding
+// does not finish in time the connection is still reported as established,
+// with bondingPending set.
 func (c *Client) waitForConnectionComplete(
 	ctx context.Context,
 	path dbus.ObjectPath,
 	wasAlreadyBonded bool,
-) error {
-	if wasAlreadyBonded {
-		if err := c.watchProperty(ctx, path, bluezDeviceIface, propConnected, boolPropertyWant(true)); err != nil {
-			return err
-		}
-		notify(notifyAppName, "Connected to "+c.getDeviceName(ctx, path))
-		return nil
-	}
-
+) (bondingPending bool, err error) {
 	if err := c.watchProperty(ctx, path, bluezDeviceIface, propConnected, boolPropertyWant(true)); err != nil {
-		return err
+		return false, err
+	}
+	if wasAlreadyBonded {
+		return false, nil
 	}
 
-	fmt.Fprintf(os.Stderr, "%swaiting for bonding to complete...\n", stderrPrefix)
-
+	if c.verbose {
+		fmt.Fprintf(os.Stderr, "%swaiting for bonding to complete...\n", stderrPrefix)
+	}
 	bondCtx, cancel := context.WithTimeout(ctx, c.timeouts.bonding)
 	defer cancel()
 
 	bondedDone := make(chan error, 1)
 	pairedDone := make(chan error, 1)
-
 	var bondWg sync.WaitGroup
 	bondWg.Add(2)
 	go func() {
@@ -208,24 +205,18 @@ func (c *Client) waitForConnectionComplete(
 		defer bondWg.Done()
 		pairedDone <- c.watchProperty(bondCtx, path, bluezDeviceIface, propPaired, boolPropertyWant(true))
 	}()
-
 	bondedErr := <-bondedDone
 	pairedErr := <-pairedDone
-
-	// Cancel bondCtx so the goroutine that has not yet exited returns
-	// from watchProperty promptly, then wait for both to finish cleanup.
 	cancel()
 	bondWg.Wait()
-	name := c.getDeviceName(ctx, path)
+
 	if bondedErr != nil || pairedErr != nil {
 		if c.verbose {
-			fmt.Fprintf(os.Stderr, "%sbonding timeout for %s, connection may stabilize\n", stderrPrefix, path)
+			fmt.Fprintf(os.Stderr, "%sbonding with %s did not finish in time; the connection may still settle\n", stderrPrefix, path)
 		}
-		notify(notifyAppName, "Connected to "+name+" (bonding may still be completing)")
-		return nil
+		return true, nil
 	}
-	notify(notifyAppName, "Connected to "+name)
-	return nil
+	return false, nil
 }
 
 // waitForPaired waits until the Paired property becomes true.

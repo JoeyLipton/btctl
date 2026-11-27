@@ -86,7 +86,7 @@ func (m *Menu) menuDisconnect() error {
 		tell("Could not disconnect %s: %s", devicePresentName(*selected), FormatUserError(err))
 		return nil
 	}
-	menuStderr("disconnected from %s", devicePresentName(*selected))
+	tell("Disconnected from %s", devicePresentName(*selected))
 	return nil
 }
 
@@ -134,7 +134,7 @@ func (m *Menu) menuForget() error {
 		tell("Could not forget %s: %s", devicePresentName(*selected), FormatUserError(err))
 		return nil
 	}
-	menuStderr("forgot %s", devicePresentName(*selected))
+	tell("Forgot %s", devicePresentName(*selected))
 	return nil
 }
 
