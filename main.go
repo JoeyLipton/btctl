@@ -260,37 +260,45 @@ func dispatch(args []string, opts globalOptions) (int, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	return runWithAgent(ctx, clientOptions(opts), parsed.name == "pick", func(client *bluetooth.Client, agent *bluetooth.Agent) (int, error) {
-		return executeCommand(ctx, client, agent, opts.verbose, parsed)
-	})
-}
-
-// runWithAgent opens a client, registers the pairing agent, and runs fn.
-func runWithAgent(ctx context.Context, copts bluetooth.Options, pickInteractive bool, fn func(*bluetooth.Client, *bluetooth.Agent) (int, error)) (int, error) {
-	client, err := bluetooth.New(ctx, copts)
+	client, err := bluetooth.New(ctx, clientOptions(opts))
 	if err != nil {
 		return exitError, fmt.Errorf("init bluetooth client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	agent := bluetooth.NewAgent(client.Conn())
-	if err := client.RegisterAgent(ctx, agent); err != nil {
-		return exitError, fmt.Errorf("register agent: %w", err)
+	// The menu answers pairing requests with pickers; every other command
+	// has nobody to ask, so it accepts them.
+	var menu *bluetooth.Menu
+	var handler bluetooth.PairingHandler = bluetooth.AutoConfirmHandler{}
+	if parsed.name == "pick" {
+		menu = bluetooth.NewMenu(client, parsed.pickCfg)
+		handler = menu.PairingHandler()
 	}
-	defer func() {
+	unregister, err := registerAgent(ctx, client, handler)
+	if err != nil {
+		return exitError, err
+	}
+	defer unregister()
+
+	return executeCommand(ctx, client, menu, opts.verbose, parsed)
+}
+
+// registerAgent registers a pairing agent backed by handler and returns a
+// function that unregisters it.
+func registerAgent(ctx context.Context, client *bluetooth.Client, handler bluetooth.PairingHandler) (func(), error) {
+	agent := bluetooth.NewAgent(handler)
+	if err := client.RegisterAgent(ctx, agent); err != nil {
+		return nil, fmt.Errorf("register agent: %w", err)
+	}
+	return func() {
 		uctx, ucancel := context.WithTimeout(context.Background(), bluetooth.AgentUnregisterTimeout())
 		defer ucancel()
 		_ = client.UnregisterAgent(uctx, agent)
-	}()
-
-	if !pickInteractive {
-		go agent.AutoConfirm(ctx)
-	}
-	return fn(client, agent)
+	}, nil
 }
 
 // executeCommand dispatches to the handler for a validated parsedCommand.
-func executeCommand(ctx context.Context, client *bluetooth.Client, agent *bluetooth.Agent, verbose bool, parsed parsedCommand) (int, error) {
+func executeCommand(ctx context.Context, client *bluetooth.Client, menu *bluetooth.Menu, verbose bool, parsed parsedCommand) (int, error) {
 	switch parsed.name {
 	case "list":
 		return runList(ctx, client, verbose)
@@ -309,7 +317,7 @@ func executeCommand(ctx context.Context, client *bluetooth.Client, agent *blueto
 	case "adapter":
 		return runAdapter(ctx, client, parsed.adapterArgs)
 	case "pick":
-		return runPick(ctx, client, parsed.pickCfg, agent)
+		return runPick(menu)
 	default:
 		return exitUsage, errBadUsage
 	}

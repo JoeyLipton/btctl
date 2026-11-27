@@ -9,6 +9,7 @@ package bluetooth
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -39,24 +40,18 @@ type PickerConfig struct {
 	ConfigFile string // empty string means no config file
 }
 
-// Menu is the self-contained interactive driver behind `btctl pick`. It owns
-// a *Client, a PickerConfig, and an *Agent. The Agent is needed so the
-// menu can intercept BlueZ pairing requests and surface them as
-// confirmation prompts instead of letting them silently time out.
+// Menu is the self-contained interactive driver behind `btctl pick`. Pairing
+// prompts reach it through PairingHandler: register an Agent built from that
+// handler while the menu runs so BlueZ requests become yes/no pickers.
 type Menu struct {
 	client *Client
 	cfg    PickerConfig
-	agent  *Agent
 }
 
-// NewMenu returns a Menu bound to the given client, picker configuration,
-// and pairing agent. The caller retains ownership of every argument; the
-// Menu does not close the client or unregister the agent. agent may be
-// nil for code paths that never trigger pairing (the menu will still run
-// but Connect/Scan flows will be unable to surface confirmation
-// prompts).
-func NewMenu(client *Client, cfg PickerConfig, agent *Agent) *Menu {
-	return &Menu{client: client, cfg: cfg, agent: agent}
+// NewMenu returns a Menu bound to the given client and picker configuration.
+// The caller retains ownership of the client.
+func NewMenu(client *Client, cfg PickerConfig) *Menu {
+	return &Menu{client: client, cfg: cfg}
 }
 
 // mainMenuEntry describes one top-level menu item. fn==nil marks Quit.
@@ -122,7 +117,12 @@ func lookupMainMenu(label string) (func(*Menu) error, bool) {
 // prompt invokes the configured picker with the given title and lines and
 // returns the line the user selected.
 func (m *Menu) prompt(title string, lines []string) (string, error) {
-	cmd, isDmenu, err := m.pickerCmd(title)
+	return m.promptContext(context.Background(), title, lines)
+}
+
+// promptContext is prompt bound to ctx: cancelling ctx closes the picker.
+func (m *Menu) promptContext(ctx context.Context, title string, lines []string) (string, error) {
+	cmd, isDmenu, err := m.pickerCmd(ctx, title)
 	if err != nil {
 		return "", err
 	}
@@ -138,6 +138,9 @@ func (m *Menu) prompt(title string, lines []string) (string, error) {
 	}
 
 	cmd.Stdin = &stdin
+	// When ctx is cancelled the picker is killed; WaitDelay stops Wait from
+	// blocking on any child process that still holds its output pipe.
+	cmd.WaitDelay = pickerWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -169,17 +172,17 @@ func (m *Menu) prompt(title string, lines []string) (string, error) {
 }
 
 // pickerCmd builds the picker invocation for the configured backend.
-func (m *Menu) pickerCmd(title string) (*exec.Cmd, bool, error) {
+func (m *Menu) pickerCmd(ctx context.Context, title string) (*exec.Cmd, bool, error) {
 	backend, err := resolveBackend(m.cfg)
 	if err != nil {
 		return nil, false, err
 	}
 	switch backend {
 	case rofiExecutable:
-		cmd, err := rofiPromptCmd(title, m.cfg.ConfigFile)
+		cmd, err := rofiPromptCmd(ctx, title, m.cfg.ConfigFile)
 		return cmd, false, err
 	default:
-		cmd, err := dmenuCmd(m.cfg.ConfigFile)
+		cmd, err := dmenuCmd(ctx, m.cfg.ConfigFile)
 		return cmd, true, err
 	}
 }
@@ -212,7 +215,7 @@ func resolveBackend(cfg PickerConfig) (string, error) {
 
 // rofiPromptCmd builds a rofi invocation that uses title as the -p prompt
 // and applies the optional config file via "-config <path>".
-func rofiPromptCmd(title, configFile string) (*exec.Cmd, error) {
+func rofiPromptCmd(ctx context.Context, title, configFile string) (*exec.Cmd, error) {
 	path, err := resolveBinary(rofiExecutable)
 	if err != nil {
 		return nil, fmt.Errorf("rofi prompt: rofi not found: %w", ErrNoPicker)
@@ -224,12 +227,12 @@ func rofiPromptCmd(title, configFile string) (*exec.Cmd, error) {
 		}
 		args = append(args, "-config", configFile)
 	}
-	return exec.Command(path, args...), nil
+	return exec.CommandContext(ctx, path, args...), nil
 }
 
 // dmenuCmd builds the dmenu invocation. When configFile is non-empty it is
 // validated and parsed into extra dmenu arguments.
-func dmenuCmd(configFile string) (*exec.Cmd, error) {
+func dmenuCmd(ctx context.Context, configFile string) (*exec.Cmd, error) {
 	path, err := resolveBinary(dmenuExecutable)
 	if err != nil {
 		return nil, fmt.Errorf("dmenu prompt: dmenu not found: %w", ErrNoPicker)
@@ -245,7 +248,7 @@ func dmenuCmd(configFile string) (*exec.Cmd, error) {
 		}
 		extraArgs = flags
 	}
-	return exec.Command(path, extraArgs...), nil
+	return exec.CommandContext(ctx, path, extraArgs...), nil
 }
 
 // validatePickerConfigFile reports a uniform "not found" error if path is

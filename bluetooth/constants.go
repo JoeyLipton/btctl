@@ -127,6 +127,9 @@ const (
 // signalChannelBuffer is the capacity of D-Bus signal delivery channels.
 const signalChannelBuffer = 8
 
+// pickerWaitDelay is how long a killed picker may keep its pipes open.
+const pickerWaitDelay = time.Second
+
 // Picker backend executable names.
 const (
 	rofiExecutable  = "rofi"

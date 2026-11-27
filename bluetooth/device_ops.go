@@ -55,8 +55,8 @@ func (c *Client) UnregisterAgent(ctx context.Context, agent *Agent) error {
 
 // PairDevice runs the BlueZ pairing handshake and waits for Paired: true.
 // Connect() must be called separately after PairDevice returns. Trusted is set
-// before Pair(). Agent confirmation during Pair() is handled by the menu or
-// AutoConfirm loop while the Pair() D-Bus call is in flight.
+// before Pair(). While the Pair() call is in flight BlueZ asks the registered
+// agent, whose PairingHandler answers.
 func (c *Client) PairDevice(ctx context.Context, path dbus.ObjectPath) error {
 	if c == nil || c.conn == nil {
 		return fmt.Errorf("pair device: bluetooth client is not connected")

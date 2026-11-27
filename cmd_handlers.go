@@ -217,8 +217,7 @@ func runTrust(ctx context.Context, client *bluetooth.Client, address string, tru
 	return exitSuccess, nil
 }
 
-func runPick(_ context.Context, client *bluetooth.Client, cfg bluetooth.PickerConfig, agent *bluetooth.Agent) (int, error) {
-	menu := bluetooth.NewMenu(client, cfg, agent)
+func runPick(menu *bluetooth.Menu) (int, error) {
 	if err := menu.Run(); err != nil {
 		return exitError, fmt.Errorf("pick: %w", err)
 	}

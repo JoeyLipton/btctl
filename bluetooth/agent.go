@@ -1,9 +1,12 @@
 // Package bluetooth - agent.go implements a BlueZ pairing agent.
-// The agent handles confirmation requests from BlueZ during device pairing. It
-// does not implement real PIN entry or passkey display beyond logging; modern
-// BLE devices use Just Works or Numeric Comparison pairing, which only requires
-// a yes/no confirmation. The interactive menu drives that confirmation through
-// WaitForConfirmation/Confirm/Reject; non-interactive commands use AutoConfirm.
+//
+// BlueZ calls the agent (org.bluez.Agent1) whenever pairing needs a decision.
+// Every call runs on its own godbus dispatch goroutine; the agent forwards it
+// synchronously to a PairingHandler, which asks the user (menu) or applies a
+// policy (CLI), and returns the handler's answer as the D-Bus reply. Each
+// request gets its own context, cancelled when BlueZ calls Cancel or Release
+// or when agentResponseTimeout expires, so there is no shared state between
+// requests that could be lost, mixed up, or left broken by a cancellation.
 package bluetooth
 
 import (
@@ -11,68 +14,94 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/godbus/dbus/v5"
 )
 
-// pairingRequest is the payload delivered to the menu layer when BlueZ
-// asks the agent to confirm pairing for a device.
-type pairingRequest struct {
-	device  dbus.ObjectPath
-	passkey uint32
+// PairingKind identifies what BlueZ is asking the agent for.
+type PairingKind int
+
+const (
+	// PairingConfirm asks whether Passkey matches the one shown on the device
+	// (Secure Simple Pairing numeric comparison).
+	PairingConfirm PairingKind = iota
+	// PairingAuthorize asks whether to allow a pairing that has no passkey
+	// (Just Works).
+	PairingAuthorize
+)
+
+// PairingRequest describes one call BlueZ made into the agent.
+type PairingRequest struct {
+	Kind    PairingKind
+	Device  dbus.ObjectPath
+	Address string // MAC address derived from Device
+	Passkey uint32 // for PairingConfirm
 }
 
-// Agent implements the org.bluez.Agent1 D-Bus interface. BlueZ calls into
-// this object whenever it needs a pairing decision.
+// PairingHandler decides pairing requests. Its methods are called from D-Bus
+// dispatch goroutines and must be safe for concurrent use. ctx is cancelled
+// when BlueZ cancels the request or the agent's response timeout expires.
+type PairingHandler interface {
+	// Confirm returns true to accept a PairingConfirm or PairingAuthorize
+	// request.
+	Confirm(ctx context.Context, req PairingRequest) bool
+}
+
+// Agent implements the org.bluez.Agent1 D-Bus interface on top of a
+// PairingHandler. Only methods returning *dbus.Error are exported on the bus.
 type Agent struct {
-	conn *dbus.Conn
+	handler PairingHandler
 
-	mu         sync.Mutex
-	pairingDev dbus.ObjectPath
-	requestCh  chan pairingRequest
-	confirmCh  chan bool
-	passkeyCh  chan uint32
-	cancelCh   chan struct{}
+	mu       sync.Mutex
+	nextID   int
+	inflight map[int]context.CancelFunc
 }
 
-// NewAgent constructs an Agent bound to conn. The caller must invoke
+// NewAgent returns an Agent that consults handler. The caller must invoke
 // Client.RegisterAgent to register it with BlueZ.
-func NewAgent(conn *dbus.Conn) *Agent {
-	return &Agent{
-		conn:      conn,
-		requestCh: make(chan pairingRequest),
-		confirmCh: make(chan bool),
-		passkeyCh: make(chan uint32),
-		cancelCh:  make(chan struct{}),
+func NewAgent(handler PairingHandler) *Agent {
+	return &Agent{handler: handler, inflight: make(map[int]context.CancelFunc)}
+}
+
+// begin starts tracking a request and returns its context and a release func.
+func (a *Agent) begin() (context.Context, func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), agentResponseTimeout)
+	a.mu.Lock()
+	id := a.nextID
+	a.nextID++
+	a.inflight[id] = cancel
+	a.mu.Unlock()
+	return ctx, func() {
+		a.mu.Lock()
+		delete(a.inflight, id)
+		a.mu.Unlock()
+		cancel()
 	}
 }
 
-// snapshotChans returns the agent's current channel set under mu.
-func (a *Agent) snapshotChans() (chan pairingRequest, chan bool, chan uint32, chan struct{}) {
+// cancelInflight cancels every request currently being handled.
+func (a *Agent) cancelInflight() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.requestCh, a.confirmCh, a.passkeyCh, a.cancelCh
+	for _, cancel := range a.inflight {
+		cancel()
+	}
 }
 
-func (a *Agent) setPairingDevice(device dbus.ObjectPath) {
-	a.mu.Lock()
-	a.pairingDev = device
-	a.mu.Unlock()
-}
-
-func (a *Agent) clearPairingDevice() {
-	a.mu.Lock()
-	a.pairingDev = ""
-	a.mu.Unlock()
-}
-
-// PairingDevice reports the object path of the device currently being
-// paired, or "" if no request is in progress.
-func (a *Agent) PairingDevice() dbus.ObjectPath {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.pairingDev
+// confirm runs a yes/no request through the handler and maps the answer to
+// the D-Bus reply BlueZ expects.
+func (a *Agent) confirm(req PairingRequest) *dbus.Error {
+	ctx, done := a.begin()
+	defer done()
+	accepted := a.handler != nil && a.handler.Confirm(ctx, req)
+	switch {
+	case ctx.Err() != nil:
+		return dbus.NewError(errNameCanceled, []any{"Canceled"})
+	case accepted:
+		return nil
+	default:
+		return dbus.NewError(errNameRejected, []any{"Rejected"})
+	}
 }
 
 // agentLogAlways writes unconditionally. Use for rare but significant
@@ -91,7 +120,7 @@ func agentLogVerbose(format string, args ...interface{}) {
 
 // Release is called by BlueZ when the agent is unregistered.
 func (a *Agent) Release() *dbus.Error {
-	a.reopenCancelCh()
+	a.cancelInflight()
 	return nil
 }
 
@@ -107,21 +136,12 @@ func (a *Agent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Err
 	return nil
 }
 
-// RequestPasskey handles legacy passkey entry flows.
+// RequestPasskey handles legacy passkey entry flows. Passkey entry is not
+// supported yet, so the request is rejected immediately rather than left to
+// time out.
 func (a *Agent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
 	agentLogAlways("RequestPasskey from %s", device)
-	a.setPairingDevice(device)
-	defer a.clearPairingDevice()
-
-	_, _, passkeyCh, cancelCh := a.snapshotChans()
-	select {
-	case p := <-passkeyCh:
-		return p, nil
-	case <-cancelCh:
-		return 0, &dbus.Error{Name: errNameCanceled}
-	case <-time.After(agentResponseTimeout):
-		return 0, &dbus.Error{Name: errNameCanceled}
-	}
+	return 0, dbus.NewError(errNameRejected, []any{"Passkey entry not supported"})
 }
 
 // DisplayPasskey logs a passkey for the user to verify.
@@ -130,61 +150,16 @@ func (a *Agent) DisplayPasskey(device dbus.ObjectPath, passkey uint32, entered u
 	return nil
 }
 
-// RequestConfirmation forwards a Secure Simple Pairing confirmation request
-// to the menu or AutoConfirm loop.
+// RequestConfirmation handles Secure Simple Pairing numeric comparison.
 func (a *Agent) RequestConfirmation(device dbus.ObjectPath, passkey uint32) *dbus.Error {
-	agentLogAlways("RequestConfirmation from %s, passkey: %d", device, passkey)
-	notifyAlert("btctl - pairing request", "Authorize connection from "+deviceLabelFromPath(device)+"?")
-	a.setPairingDevice(device)
-	defer a.clearPairingDevice()
-
-	requestCh, confirmCh, _, cancelCh := a.snapshotChans()
-	select {
-	case requestCh <- pairingRequest{device: device, passkey: passkey}:
-	case <-cancelCh:
-		return &dbus.Error{Name: errNameCanceled}
-	case <-time.After(agentResponseTimeout):
-		return &dbus.Error{Name: errNameCanceled}
-	}
-	select {
-	case decision := <-confirmCh:
-		if decision {
-			return nil
-		}
-		return &dbus.Error{Name: errNameRejected}
-	case <-cancelCh:
-		return &dbus.Error{Name: errNameCanceled}
-	case <-time.After(agentResponseTimeout):
-		return &dbus.Error{Name: errNameCanceled}
-	}
+	agentLogAlways("RequestConfirmation from %s, passkey: %06d", device, passkey)
+	return a.confirm(PairingRequest{Kind: PairingConfirm, Device: device, Address: deviceLabelFromPath(device), Passkey: passkey})
 }
 
 // RequestAuthorization handles Just Works pairing authorization.
 func (a *Agent) RequestAuthorization(device dbus.ObjectPath) *dbus.Error {
 	agentLogAlways("RequestAuthorization from %s", device)
-	notifyAlert("btctl - pairing request", "Authorize connection from "+deviceLabelFromPath(device)+"?")
-	a.setPairingDevice(device)
-	defer a.clearPairingDevice()
-
-	requestCh, confirmCh, _, cancelCh := a.snapshotChans()
-	select {
-	case requestCh <- pairingRequest{device: device, passkey: 0}:
-	case <-cancelCh:
-		return &dbus.Error{Name: errNameCanceled}
-	case <-time.After(agentResponseTimeout):
-		return &dbus.Error{Name: errNameCanceled}
-	}
-	select {
-	case decision := <-confirmCh:
-		if decision {
-			return nil
-		}
-		return &dbus.Error{Name: errNameRejected}
-	case <-cancelCh:
-		return &dbus.Error{Name: errNameCanceled}
-	case <-time.After(agentResponseTimeout):
-		return &dbus.Error{Name: errNameCanceled}
-	}
+	return a.confirm(PairingRequest{Kind: PairingAuthorize, Device: device, Address: deviceLabelFromPath(device)})
 }
 
 // AuthorizeService accepts per-profile access for paired devices.
@@ -193,81 +168,21 @@ func (a *Agent) AuthorizeService(device dbus.ObjectPath, uuid string) *dbus.Erro
 	return nil
 }
 
-// Cancel aborts a pending agent request.
+// Cancel aborts the requests currently in progress. Later requests are
+// handled normally.
 func (a *Agent) Cancel() *dbus.Error {
 	agentLogVerbose("Cancel")
-	a.reopenCancelCh()
+	a.cancelInflight()
 	return nil
 }
 
-// reopenCancelCh replaces cancelCh with a fresh unbuffered channel under a.mu.
-func (a *Agent) reopenCancelCh() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	closeIfOpen(a.cancelCh)
-	a.cancelCh = make(chan struct{})
-}
+// AutoConfirmHandler accepts every request. Non-interactive commands use it
+// because there is no picker to ask the user.
+type AutoConfirmHandler struct{}
 
-// WaitForConfirmation blocks until BlueZ issues a confirmation request,
-// ctx is done, or the agent is canceled.
-func (a *Agent) WaitForConfirmation(ctx context.Context) (bool, uint32, error) {
-	requestCh, _, _, cancelCh := a.snapshotChans()
-	select {
-	case req := <-requestCh:
-		return true, req.passkey, nil
-	case <-cancelCh:
-		return false, 0, ErrAgentCanceled
-	case <-ctx.Done():
-		return false, 0, ctx.Err()
-	}
-}
-
-// Confirm signals accept pairing for the current request.
-func (a *Agent) Confirm() {
-	_, confirmCh, _, _ := a.snapshotChans()
-	safeSendBool(confirmCh, true)
-}
-
-// Reject signals reject pairing for the current request.
-func (a *Agent) Reject() {
-	_, confirmCh, _, _ := a.snapshotChans()
-	safeSendBool(confirmCh, false)
-}
-
-// AutoConfirm auto-accepts every confirmation request until ctx is done.
-//
-// It is used by the non-interactive CLI commands (connect, the scan
-// connect prompt) where there is no picker to ask the user. The interactive
-// `btctl pick` menu does the opposite: it relays each request to a yes/no
-// picker via WaitForConfirmation, so the two paths are mutually exclusive and
-// only one consumes the agent's request channel at a time.
-func (a *Agent) AutoConfirm(ctx context.Context) {
-	for {
-		needsConfirm, _, err := a.WaitForConfirmation(ctx)
-		if err != nil {
-			return
-		}
-		if needsConfirm {
-			agentLogVerbose("auto-confirming pairing request")
-			notify(notifyAppName, "Auto-authorized connection from "+deviceLabelFromPath(a.PairingDevice()))
-			a.Confirm()
-		}
-	}
-}
-
-// safeSendBool sends v on ch without blocking if the receiver has exited.
-func safeSendBool(ch chan<- bool, v bool) {
-	select {
-	case ch <- v:
-	default:
-	}
-}
-
-// closeIfOpen closes ch if it has not already been closed.
-func closeIfOpen(ch chan struct{}) {
-	select {
-	case <-ch:
-	default:
-		close(ch)
-	}
+// Confirm accepts the request and tells the user it did so.
+func (AutoConfirmHandler) Confirm(_ context.Context, req PairingRequest) bool {
+	agentLogVerbose("auto-confirming pairing request from %s", req.Address)
+	notify(notifyAppName, "Auto-authorized connection from "+req.Address)
+	return true
 }
