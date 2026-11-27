@@ -411,12 +411,3 @@ func batteryFromInterfaces(ifaces map[string]map[string]dbus.Variant) int {
 	}
 	return batteryUnavailable
 }
-
-// stringProp reads a string property with a fallback value.
-func stringProp(props map[string]dbus.Variant, key, fallback string) string {
-	var s string
-	if getObjectProperty(props, key, &s) {
-		return s
-	}
-	return fallback
-}

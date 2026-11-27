@@ -86,10 +86,7 @@ type BlueZ struct {
 	calls     map[string]int
 	agent     *AgentState
 	replies   []AgentReply
-
-	// OnStartDiscovery, when set, runs in its own goroutine after
-	// Adapter1.StartDiscovery returns. Tests use it to "discover" devices.
-	OnStartDiscovery func(b *BlueZ)
+	onStart   func(b *BlueZ)
 }
 
 // New starts a private bus with a fake bluetoothd on it and points
@@ -201,6 +198,14 @@ func (b *BlueZ) AddDevice(d Device) dbus.ObjectPath {
 	b.export(&deviceHandler{b, path}, path, DeviceIface)
 	b.emitAdded(path)
 	return path
+}
+
+// OnStartDiscovery sets a function that runs in its own goroutine after
+// Adapter1.StartDiscovery returns. Tests use it to "discover" devices.
+func (b *BlueZ) OnStartDiscovery(fn func(b *BlueZ)) {
+	b.mu.Lock()
+	b.onStart = fn
+	b.mu.Unlock()
 }
 
 // SetBehavior scripts how the device at path reacts to Pair and Connect.
@@ -467,7 +472,10 @@ func (h *adapterHandler) StartDiscovery() *dbus.Error {
 		return bluezError("NotReady", "Resource Not Ready")
 	}
 	h.b.SetProperty(h.path, AdapterIface, "Discovering", true)
-	if fn := h.b.OnStartDiscovery; fn != nil {
+	h.b.mu.Lock()
+	fn := h.b.onStart
+	h.b.mu.Unlock()
+	if fn != nil {
 		go fn(h.b)
 	}
 	return nil

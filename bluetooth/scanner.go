@@ -1,8 +1,14 @@
 // Package bluetooth - scanner.go runs BlueZ device discovery for a bounded
-// duration and reports newly seen devices. It subscribes to InterfacesAdded and
-// PropertiesChanged before calling StartDiscovery so no early signals are
-// missed, deduplicates by address, and excludes devices BlueZ already knew
-// about before the scan started. StopDiscovery always runs on return.
+// duration and reports devices in range that are not paired yet.
+//
+// It subscribes to InterfacesAdded and PropertiesChanged before taking the
+// object snapshot and calling StartDiscovery, so no device can slip between
+// the two. Results are deduplicated by address and limited to the active
+// adapter. Paired devices are never results (they are listed elsewhere), but
+// unpaired devices BlueZ already had cached are: BlueZ keeps recently seen
+// devices for a while (30 s by default, longer while another tool scans), so
+// such a device is reported as soon as it is heard during the scan. Discovery
+// is always stopped on return.
 package bluetooth
 
 import (
@@ -19,9 +25,9 @@ import (
 type ScanEventKind int
 
 const (
-	// ScanEventFound fires the first time a brand-new device is observed.
+	// ScanEventFound fires the first time a device is seen during the scan.
 	ScanEventFound ScanEventKind = iota
-	// ScanEventUpdated fires when a device acquires a human-readable Name.
+	// ScanEventUpdated fires when a found device acquires a human-readable Name.
 	ScanEventUpdated
 )
 
@@ -31,10 +37,9 @@ type ScanEvent struct {
 	Device Device
 }
 
-type scannedDevice struct {
-	device         Device
-	emittedUpdated bool
-}
+// advertisementProps are Device1 properties BlueZ only updates when it
+// receives an advertisement or inquiry result, i.e. when the device is in range.
+var advertisementProps = []string{"RSSI", "TxPower", "ManufacturerData", "ServiceData"}
 
 // Scan runs Bluetooth discovery on the active adapter for the given duration.
 func (c *Client) Scan(ctx context.Context, duration time.Duration, onEvent func(ScanEvent)) (devices []Device, retErr error) {
@@ -45,16 +50,16 @@ func (c *Client) Scan(ctx context.Context, duration time.Duration, onEvent func(
 		return nil, fmt.Errorf("scan: duration must be positive, got %s", duration)
 	}
 
-	adapterPath, preObjects, err := c.findAdapterPath(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-
 	cleanup, sigCh, err := c.subscribeScanSignals()
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
+
+	adapterPath, objects, err := c.findAdapterPath(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("scan: %w", err)
+	}
 
 	if err := c.callCtx(ctx, adapterPath, bluezAdapterIface, "StartDiscovery"); err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
@@ -65,18 +70,19 @@ func (c *Client) Scan(ctx context.Context, duration time.Duration, onEvent func(
 		}
 	}()
 
-	preExisting := snapshotAddresses(preObjects)
-	byAddress := make(map[string]*scannedDevice)
-	pathToAddress := make(map[dbus.ObjectPath]string)
-
-	emit := func(kind ScanEventKind, d Device) {
-		if onEvent != nil {
-			onEvent(ScanEvent{Kind: kind, Device: d})
+	state := newScanState(adapterPath, objects, onEvent)
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return state.results(), nil
+		case <-timer.C:
+			return state.results(), nil
+		case sig := <-sigCh:
+			state.handle(sig)
 		}
 	}
-
-	devices, retErr = c.runScanLoop(ctx, duration, sigCh, preExisting, byAddress, pathToAddress, emit)
-	return devices, retErr
 }
 
 // subscribeScanSignals registers D-Bus match rules for scan events.
@@ -112,84 +118,117 @@ func (c *Client) subscribeScanSignals() (cleanup func(), sigCh chan *dbus.Signal
 	return cleanup, sigCh, nil
 }
 
-// runScanLoop processes D-Bus signals until duration elapses or ctx is canceled.
-func (c *Client) runScanLoop(
-	ctx context.Context,
-	duration time.Duration,
-	sigCh chan *dbus.Signal,
-	preExisting map[string]bool,
-	byAddress map[string]*scannedDevice,
-	pathToAddress map[dbus.ObjectPath]string,
-	emit func(ScanEventKind, Device),
-) ([]Device, error) {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
+// scanState accumulates scan results.
+type scanState struct {
+	adapterPrefix string                     // "/org/bluez/hci0/"
+	paired        map[string]bool            // lower-cased addresses of paired devices
+	cached        map[dbus.ObjectPath]Device // unpaired devices known before the scan, not yet heard
+	found         map[string]*scannedDevice  // results by lower-cased address
+	pathToAddress map[dbus.ObjectPath]string
+	onEvent       func(ScanEvent)
+}
 
-loop:
-	for {
-		select {
-		case <-ctx.Done():
-			break loop
-		case <-timer.C:
-			break loop
-		case sig := <-sigCh:
-			if sig == nil {
-				continue
-			}
-			switch sig.Name {
-			case signalInterfacesAdded:
-				path, props, ok := decodeInterfacesAdded(sig)
-				if ok {
-					scanHandleAdded(path, props, preExisting, byAddress, pathToAddress, emit)
-				}
-			case signalPropertiesChanged:
-				iface, changed, ok := decodePropertiesChanged(sig)
-				if ok {
-					scanHandlePropsChanged(sig.Path, iface, changed, byAddress, pathToAddress, emit)
-				}
-			}
+type scannedDevice struct {
+	device         Device
+	emittedUpdated bool
+}
+
+func newScanState(adapterPath dbus.ObjectPath, objects managedObjects, onEvent func(ScanEvent)) *scanState {
+	s := &scanState{
+		adapterPrefix: string(adapterPath) + "/",
+		paired:        make(map[string]bool),
+		cached:        make(map[dbus.ObjectPath]Device),
+		found:         make(map[string]*scannedDevice),
+		pathToAddress: make(map[dbus.ObjectPath]string),
+		onEvent:       onEvent,
+	}
+	for path, ifaces := range objects {
+		props, ok := ifaces[bluezDeviceIface]
+		if !ok {
+			continue
+		}
+		d := parseDevice(path, props, ifaces)
+		if d.Address == "" {
+			continue
+		}
+		if d.Paired {
+			s.paired[strings.ToLower(d.Address)] = true
+		} else if s.onAdapter(path) {
+			s.cached[path] = d
 		}
 	}
-
-	return collectScanResults(byAddress), nil
+	return s
 }
 
-// scanHandleAdded records a newly discovered device during scan.
-func scanHandleAdded(
-	path dbus.ObjectPath,
-	props map[string]dbus.Variant,
-	preExisting map[string]bool,
-	byAddress map[string]*scannedDevice,
-	pathToAddress map[dbus.ObjectPath]string,
-	emit func(ScanEventKind, Device),
-) {
-	d := parseDevice(path, props, nil)
+func (s *scanState) onAdapter(path dbus.ObjectPath) bool {
+	return strings.HasPrefix(string(path), s.adapterPrefix)
+}
+
+func (s *scanState) emit(kind ScanEventKind, d Device) {
+	if s.onEvent != nil {
+		s.onEvent(ScanEvent{Kind: kind, Device: d})
+	}
+}
+
+// handle processes one D-Bus signal.
+func (s *scanState) handle(sig *dbus.Signal) {
+	if sig == nil {
+		return
+	}
+	switch sig.Name {
+	case signalInterfacesAdded:
+		if path, props, ok := decodeInterfacesAdded(sig); ok && s.onAdapter(path) {
+			s.add(path, parseDevice(path, props, nil))
+		}
+	case signalPropertiesChanged:
+		if iface, changed, ok := decodePropertiesChanged(sig); ok && iface == bluezDeviceIface {
+			s.propertiesChanged(sig.Path, changed)
+		}
+	}
+}
+
+// add records a device seen during the scan, ignoring paired devices.
+func (s *scanState) add(path dbus.ObjectPath, d Device) {
 	key := strings.ToLower(d.Address)
-	if key == "" || preExisting[key] {
+	if key == "" || d.Paired || s.paired[key] {
 		return
 	}
-	if deduplicateDevices(byAddress, pathToAddress, path, d) {
-		emit(ScanEventFound, d)
+	s.pathToAddress[path] = key
+	if existing, ok := s.found[key]; ok {
+		if isUnknownName(existing.device.Name) && !isUnknownName(d.Name) {
+			existing.device.Name = d.Name
+		}
+		return
 	}
+	s.found[key] = &scannedDevice{device: d}
+	s.emit(ScanEventFound, d)
 }
 
-// scanHandlePropsChanged updates a device name from PropertiesChanged.
-func scanHandlePropsChanged(
-	path dbus.ObjectPath,
-	iface string,
-	changed map[string]dbus.Variant,
-	byAddress map[string]*scannedDevice,
-	pathToAddress map[dbus.ObjectPath]string,
-	emit func(ScanEventKind, Device),
-) {
-	if iface != bluezDeviceIface {
+// propertiesChanged reports cached devices once they advertise and picks up
+// names that arrive after a device was found.
+func (s *scanState) propertiesChanged(path dbus.ObjectPath, changed map[string]dbus.Variant) {
+	if d, ok := s.cached[path]; ok {
+		if !hasAny(changed, advertisementProps) {
+			return
+		}
+		delete(s.cached, path)
+		var name string
+		if getObjectProperty(changed, "Name", &name) && name != "" {
+			d.Name = name
+		}
+		var rssi int16
+		if getObjectProperty(changed, "RSSI", &rssi) {
+			d.RSSI = rssi
+		}
+		s.add(path, d)
 		return
 	}
-	key, ok := pathToAddress[path]
+
+	key, ok := s.pathToAddress[path]
 	if !ok {
 		return
 	}
-	state, ok := byAddress[key]
+	state, ok := s.found[key]
 	if !ok || state.emittedUpdated || !isUnknownName(state.device.Name) {
 		return
 	}
@@ -199,36 +238,15 @@ func scanHandlePropsChanged(
 	}
 	state.device.Name = name
 	state.emittedUpdated = true
-	emit(ScanEventUpdated, state.device)
+	s.emit(ScanEventUpdated, state.device)
 }
 
-// deduplicateDevices merges incoming into seen by address. Returns true when
-// incoming is a newly discovered device that should emit ScanEventFound.
-func deduplicateDevices(
-	seen map[string]*scannedDevice,
-	pathToAddress map[dbus.ObjectPath]string,
-	path dbus.ObjectPath,
-	incoming Device,
-) bool {
-	key := strings.ToLower(incoming.Address)
-	existing, found := seen[key]
-	if !found {
-		seen[key] = &scannedDevice{device: incoming}
-		pathToAddress[path] = key
-		return true
-	}
-	if isUnknownName(existing.device.Name) && !isUnknownName(incoming.Name) {
-		existing.device.Name = incoming.Name
-	}
-	pathToAddress[path] = key
-	return false
-}
-
-// collectScanResults builds a sorted device slice from the scan accumulator.
-func collectScanResults(byAddress map[string]*scannedDevice) []Device {
-	devices := make([]Device, 0, len(byAddress))
-	for _, s := range byAddress {
-		devices = append(devices, s.device)
+// results returns the found devices: named ones first (alphabetically), then
+// unnamed ones by address.
+func (s *scanState) results() []Device {
+	devices := make([]Device, 0, len(s.found))
+	for _, f := range s.found {
+		devices = append(devices, f.device)
 	}
 	sort.Slice(devices, func(i, j int) bool {
 		iUnknown := isUnknownName(devices[i].Name)
@@ -244,20 +262,13 @@ func collectScanResults(byAddress map[string]*scannedDevice) []Device {
 	return devices
 }
 
-// snapshotAddresses returns lower-cased device addresses present before scan.
-func snapshotAddresses(objects managedObjects) map[string]bool {
-	addrs := make(map[string]bool, len(objects))
-	for _, ifaces := range objects {
-		props, ok := ifaces[bluezDeviceIface]
-		if !ok {
-			continue
-		}
-		addr := stringProp(props, "Address", "")
-		if addr != "" {
-			addrs[strings.ToLower(addr)] = true
+func hasAny(m map[string]dbus.Variant, keys []string) bool {
+	for _, k := range keys {
+		if _, ok := m[k]; ok {
+			return true
 		}
 	}
-	return addrs
+	return false
 }
 
 // decodeInterfacesAdded extracts the device payload of an InterfacesAdded signal.
