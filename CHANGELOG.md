@@ -6,12 +6,18 @@ All notable changes to btctl are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-28
+
 ### Fixed
 
 - Release binaries no longer report a "-dirty" source tree in
   `btctl --version` (v0.1.0 shows `dcff7cb40174-dirty`): the release
   workflow wrote its notes file into the checkout before building. The
   release and CI builds now refuse to build from a modified checkout.
+
+### Changed
+
+- Updated github.com/godbus/dbus/v5 from 5.2.2 to 5.2.4.
 
 ## [0.1.0] - 2026-11-27
 
@@ -70,5 +76,6 @@ First tagged release, with prebuilt binaries for x86-64 and ARM
   pairing or connecting. Previously any nearby device that started pairing
   while a btctl command ran was accepted.
 
-[Unreleased]: https://github.com/JoeyLipton/btctl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/JoeyLipton/btctl/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/JoeyLipton/btctl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/JoeyLipton/btctl/releases/tag/v0.1.0
