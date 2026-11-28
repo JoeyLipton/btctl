@@ -84,9 +84,15 @@ func TestPairDeviceFailureStopsWatching(t *testing.T) {
 	if err := client.Pair(testContext(t), path); !isDBusError(err, errNameAuthFailed) {
 		t.Fatalf("Pair = %v, want AuthenticationFailed", err)
 	}
+	// A Get the watcher sent just before it was cancelled may still be in
+	// flight: the fake handles each call in its own goroutine and can count
+	// it after Pair has returned. Let such calls land before counting.
+	time.Sleep(300 * time.Millisecond)
 	fake.ResetCalls()
-	time.Sleep(1500 * time.Millisecond)
+	// A leaked watcher polls once per watchPollInterval (1 s), so it would be
+	// seen at least twice in this window.
+	time.Sleep(2500 * time.Millisecond)
 	if n := fake.Calls("Properties.Get"); n != 0 {
-		t.Errorf("%d Properties.Get calls after PairDevice returned; its watcher is still running", n)
+		t.Errorf("%d Properties.Get calls after Pair returned; its watcher is still running", n)
 	}
 }
