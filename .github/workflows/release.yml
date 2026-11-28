@@ -28,7 +28,9 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME is not a semantic version (vX.Y.Z)"
             exit 1
           fi
-          scripts/release-notes.sh "$GITHUB_REF_NAME" > release-notes.md
+          # Outside the checkout: an untracked file would make Go stamp the
+          # binaries with a "-dirty" source tree.
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
       - name: Install dbus-daemon
         run: |
           sudo apt-get update
@@ -38,7 +40,13 @@ jobs:
           BTCTL_REQUIRE_DBUS: "1"
         run: go test -race ./...
       - name: Build
-        run: scripts/build-release.sh "$GITHUB_REF_NAME"
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The checkout is not clean; the binaries would report a -dirty version:"
+            git status --porcelain
+            exit 1
+          fi
+          scripts/build-release.sh "$GITHUB_REF_NAME"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
@@ -54,5 +62,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
             --verify-tag \
             --title "btctl $GITHUB_REF_NAME" \
-            --notes-file release-notes.md \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${prerelease[@]}"

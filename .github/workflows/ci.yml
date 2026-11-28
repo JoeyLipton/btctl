@@ -83,13 +83,21 @@ jobs:
         with:
           go-version: stable
       - name: Build all platforms
-        run: scripts/build-release.sh "$(git describe --tags --always)"
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The checkout is not clean; the binaries would report a -dirty version:"
+            git status --porcelain
+            exit 1
+          fi
+          scripts/build-release.sh "$(git describe --tags --always)"
       - name: Smoke-test the amd64 binary
         run: |
           archive="$(ls dist/btctl_*_linux_amd64.tar.gz)"
           tar -xzf "$archive" -C dist
           bin="${archive%.tar.gz}/btctl"
-          "$bin" --version
+          version="$("$bin" --version)"
+          echo "$version"
+          case "$version" in *-dirty*) echo "::error::Binary reports a dirty source tree"; exit 1;; esac
           "$bin" help >/dev/null
       - uses: actions/upload-artifact@v7
         with:
