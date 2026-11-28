@@ -6,6 +6,13 @@ All notable changes to btctl are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Release binaries no longer report a "-dirty" source tree in
+  `btctl --version` (v0.1.0 shows `dcff7cb40174-dirty`): the release
+  workflow wrote its notes file into the checkout before building. The
+  release and CI builds now refuse to build from a modified checkout.
+
 ## [0.1.0] - 2026-11-27
 
 First tagged release, with prebuilt binaries for x86-64 and ARM
